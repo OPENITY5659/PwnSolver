@@ -48,3 +48,14 @@ challenges/*.zip
 _*.py
 wp_content.txt
 extract_docx.py
+*.so
+test_*
+pwn_challenge
+challenges/ret2win
+challenges/ret2libc*
+challenges/rop
+challenges/fmtstr*
+challenges/heap_uaf
+challenges/real_ret2libc*
+exploits/
+*.zip
