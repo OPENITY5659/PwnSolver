@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+_reasonix_archive/
+_archived/
+
+# Core dumps
+core
+core.*
+cores/
+
+# Temp files
+*.tmp
+tmp*
+
+# PWN binaries (large)
+challenges/*.zip
+*.zip
+
+# Git clutter (shell artifacts)
+", timeout=3)'"
+
+# Reasonix internal
+.reasonix/
+
+# Temp exploit files
+_*.py
+wp_content.txt
+extract_docx.py
