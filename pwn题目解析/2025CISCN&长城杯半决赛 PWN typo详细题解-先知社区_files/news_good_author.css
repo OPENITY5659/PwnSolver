@@ -1,0 +1,64 @@
+
+/*new*/
+.news_main .right_container,.container .right_container{width: 320px;}
+
+/*goods_author*/
+.news_detail_container{background: #fff;}
+.news_detail_container .left_container{margin-right: 10px;}
+.good_author{padding: 15px;border: 1px solid #EDEDED;    border-radius: 3px;}
+.gat_title{
+    font-family: PingFang SC, PingFang SC;
+    font-weight: 500;
+    font-size: 18px;
+    color: #333333;
+    text-align: left;
+    font-style: normal;
+    text-transform: none;
+    padding-bottom: 6px;
+    display: inline-block;
+    border-bottom: 3px solid #59B6D7;
+}
+.ga_items{margin-top: 15px;}
+.ga_items li{margin-top: 20px; line-height: 34px;}
+.ga_items li>a{display: flex;align-items: center;}
+.gai_rank {width: 28px;height: 28px;background: #BABABA;border-radius: 100%;}
+.gair_in{width: 22px;height: 22px;background: #909090;border-radius: 100%;margin:3px;text-align: center;color: #fff;line-height: 22px;}
+.gai_rank_1{background: #FFD64E;}
+.gai_rank_1 .gair_in{background: #F78C00;}
+.gai_rank_2{background: #A5C7FC;}
+.gai_rank_2 .gair_in{background: #3E88FF;}
+.gai_rank_3{background: #A1E0F7;}
+.gai_rank_3 .gair_in{background: #59B6D7;}
+.gai_user{display: flex;margin-left: 10px;column-gap: 5px;width: 130px;    align-items: center;}
+.gaiui_name{
+    font-family: MicrosoftYaHei, MicrosoftYaHei;
+    font-weight: normal;
+    font-size: 16px;
+    color: #333333;
+    font-style: normal;
+    text-transform: none;
+    line-height: 25px;
+}
+.gaiu_img{width: 34px;
+    height: 34px;border-radius: 100%;object-fit: cover;}
+.gaiui_desc{
+    font-family: MicrosoftYaHei, MicrosoftYaHei;
+    font-weight: normal;
+    font-size: 14px;
+    color: #999999;
+    text-align: left;
+    font-style: normal;
+    text-transform: none;
+}
+.gai_builder{
+    flex-grow: 1;
+    color:#999999;
+    text-align: left;
+    font-size: 14px;
+    width: 80px;
+}
+.gaib_name{
+    line-height: 34px;
+    max-width: 120px;
+}
+.gaiu_info{width: 80px;font-size: 14px;}

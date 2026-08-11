@@ -1,0 +1,45 @@
+
+function createSignature(data) {
+    return CryptoJS.HmacSHA1(data, TS.secretKey).toString(CryptoJS.enc.Hex);
+}
+
+// 等待 Axios 库加载完成
+document.addEventListener('DOMContentLoaded', function () {
+    // 添加请求拦截器
+    // axios.interceptors.request.use(function (config) {
+    //     // 解析 URL 并获取路径部分
+    //     const url = new URL(config.url, window.location.origin); // 假设 config.url 是相对路径或完整 URL（带域名）
+    //     const pathname = url.pathname; // 获取路径部分，例如 "/api/v2/user/notification-statistics"
+
+    //     if (config.method && config.method === 'post' || true) {
+    //         const shouldAddTimestamp = !/no-timestamp/.test(config.url);
+    //         if (config.headers['Content-Type'] && config.headers['Content-Type'].indexOf(
+    //                 'multipart/form-data') >= 0) {
+
+    //         } else {
+    //             const timestamp = Date.now();
+    //             const nonce = Math.random().toString(36).substr(2, 15);
+    //             const data = {};
+    //             data.url = encodeToBase64(config.url);
+    //             data.data = config.data ? encodeToBase64(JSON.stringify(config.data)) : '';
+    //             const params = encodeToBase64(JSON.stringify({ timestamp, nonce, data: data }));
+    //             const signature = createSignature(params);
+    //             config.headers['X-Timestamp'] = timestamp;
+    //             config.headers['X-Nonce'] = nonce;
+    //             config.headers['X-Signature'] = signature;
+    //             config.headers['X-Params'] = params;
+    //         }
+    //     }
+
+    //     return config;
+    // }, function (error) {
+    //     // 对请求错误做些什么
+    //     return Promise.reject(error);
+    // });
+});
+
+function encodeToBase64(str) {
+    const encoder = new TextEncoder();
+    const uint8Array = encoder.encode(str);
+    return btoa(String.fromCharCode.apply(null, uint8Array));
+}

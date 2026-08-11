@@ -1,0 +1,871 @@
+;(function (win, doc, $, undefined) {
+    window._is_weixin = function() {
+        var _ua = window.navigator.userAgent.toLowerCase();
+        if (_ua.match(/MicroMessenger/i) == 'micromessenger') {
+            return true;
+        } else {
+            return false;
+        }
+    }()
+    try {
+        var logininPlug = function (opts) {
+            this.init(opts)
+        }
+        logininPlug.prototype = {
+            constructor: logininPlug,
+            options: {
+                name: 'yPreview',
+                elem: 'preview-images'
+            },
+            config: function (opts) {
+                //没有参数传入，直接返回默认参数
+                if (!opts) return this.options;
+                //有参数传入，通过key将options的值更新为用户的值
+                for (var key in opts) {
+                    this.options[key] = opts[key];
+                }
+                return this;
+            },
+            init: async function (opts) {
+                var _this = this;
+                var option = this.config(opts, this.options);//用户配置
+                this.stylesheet();
+                var domtemplate = this.template();
+                $('body').append(domtemplate);
+                await this.initNECaptcha()
+    
+                $('.login_inside_box .tabItem').off('click').on('click', function (e) {
+                    $('.login_inside_box .tabItem').removeClass('active');
+                    $(this).addClass('active');
+                    if ($(this).data('idx') == 1) {
+                        $(".login_inside_box .loginInputBox").hide()
+                        $(".login_inside_box .account_box").show()
+                    } else if ($(this).data('idx') == 2) {
+                        $(".login_inside_box .tab").hide()
+                        $(".login_inside_box #weixin_mobile").hide()
+                        $(".login_inside_box .loginInputBox").hide()
+                        $(".login_inside_box .back").show()
+                        $(".login_inside_box .mobile_box").show()
+                    } else if ($(this).data('idx') == 0) {
+                        $(".login_inside_box .loginInputBox").hide()
+                        $(".login_inside_box .scanCode_box").show()
+                    }
+                })
+                $(".backBtn").on('click',function(){
+                    $('.login_inside_box .tabItem').removeClass('active');
+                    $('.login_inside_box .tabItem:first').addClass('active');
+                    $(".login_inside_box .back").hide()
+                    $(".login_inside_box .loginInputBox").hide()
+                    $(".login_inside_box .tab").show()
+                    $(".login_inside_box #weixin_mobile").show()
+                    $(".login_inside_box .scanCode_box").show()
+                })
+                $(".closeLoginBox").on('click',function(){
+                    $(".kx_login_plugbox").hide();
+                    $('.login_inside_box .tabItem').removeClass('active');
+                    $('.login_inside_box .tabItem:first').addClass('active');
+                    $(".login_inside_box .back").hide()
+                    $(".login_inside_box .loginInputBox").hide()
+                    $(".login_inside_box .tab").show()
+                    $(".login_inside_box #weixin_mobile").show()
+                    $(".login_inside_box .scanCode_box").show()
+                })
+    
+                $(".wechat_login").on('click',function(){
+                    var loop;
+                    clearInterval(loop);
+                    var wx_login_url = window.open("https://passport.kanxue.com/wx_user-wx_login_other.htm","看雪微信登录","width=600,height=500,fullscreen=1")
+                    loop = setInterval(() => {    // 使用定时器查询当前状态
+                        if (document.cookie.indexOf("wxlogin_isfreshen") !== -1) {
+                            // 包含myCookieValue
+                            clearInterval(loop);       // 清除定时器
+                            window.location.reload()
+                        }
+                        if (wx_login_url && wx_login_url.closed) {  // 进行判断条件   closed属性就是返回当前窗口的状态
+                          console.log('我被关闭了')
+                          clearInterval(loop);       // 清除定时器
+                          // Logical code
+                        }
+                      }, 1000);
+                })
+                $(".github_login").on('click',function(){
+                    let loop;
+                    clearInterval(loop);
+                    let github_login_url = window.open("https://github.com/login/oauth/authorize?client_id=11208a2d46a0d06a22fb&redirect_uri=https://passport.kanxue.com/oauth-github.htm","Github登录","width=600,height=500,fullscreen=1");
+                    loop = setInterval(() => {    // 使用定时器查询当前状态
+                        if (document.cookie.indexOf("wxlogin_isfreshen") !== -1) {
+                            // 包含myCookieValue
+                            clearInterval(loop); // 清除定时器
+                            window.location.reload()
+                        }
+                        if (github_login_url && github_login_url.closed) {  // 进行判断条件   closed属性就是返回当前窗口的状态
+                            console.log('我被关闭了')
+                            clearInterval(loop); // 清除定时器
+                            // Logical code
+                        }
+                      }, 1000);
+                })
+                if(_is_weixin) {
+                    $('#wx_explore').show();
+                    $('#wx_explore').on('click','a.btn',function(){
+                        $(this).addClass('disabled')
+                    })
+                }
+
+                $('.bindModal .tabItem').off('click').on('click', function (e) {
+                    $('.bindModal .tabItem').removeClass('active');
+                    $(this).addClass('active');
+                    if ($(this).data('idx') == 1) {
+                        $(".bindModal .loginInputBox").hide()
+                        $(".bindModal .bindMobileBox").show()
+                    } else if ($(this).data('idx') == 2) {
+                        $(".bindModal .loginInputBox").hide()
+                        $(".bindModal .bindAccountBox").show()
+                    }
+
+                })
+            },
+            stylesheet: function () {
+                var style = document.createElement('style');
+                style.type = 'text/css';
+                style.appendChild(document.createTextNode(`.login_inside_box .login-sns a.wechat_login, .login_inside_box .login-sns .github_login, .login_inside_box .login-sns .mobile_login{width:45px;height:45px;display:inline-block;border-radius:50%;line-height:45px;font-size:20px}
+                .login_inside_box .close{position:absolute;top:0px;right:20px;width:17px;height:17px}
+                .login_inside_box .loginInputBox{padding:0 32px}
+                .login-modal-backdrop{opacity:.75;position:fixed;top:0;right:0;bottom:0;left:0;z-index:1000;background-color:#000}
+                .login_inside_box{position:fixed;background:#fff;z-index:1001;max-width:384px; width:100%; padding-top:24px;padding-bottom:16px;left:50%;top:50%;-webkit-transform:translate(-50%,-50%);-moz-transform:translate(-50%,-50%);-ms-transform:translate(-50%,-50%);transform:translate(-50%,-50%);box-shadow:0 12px 24px 0 rgb(28 31 33 / 10%);border-radius:12px;transition:all .2s;-webkit-transition:all .2s;-moz-transition:all .2s;-o-transition:all .2s}
+                .login_inside_box .formControl{transition: all 1s; width:100%;height:48px;line-height:20px;box-sizing:border-box;padding:14px;box-shadow:2px 0 5px 0 #fff;background:rgba(28, 31, 33, 0.06);border-radius:0px;border:0}
+                .login_inside_box .text-center{text-align:center}
+                .login_inside_box .bg-white{background-color:#fff}
+                .bindModal .tab, .login_inside_box .tab{padding:0 20px 18px 30px;font-size:18px;line-height:40px;font-weight:700;height:40px;color:#787d82;box-sizing:content-box}
+                .bindModal .tab .tabItem, .login_inside_box .tab .tabItem{float:left;text-align:center;height:40px;line-height:40px;cursor:pointer;margin-right:32px}
+                .bindModal .tab .active, .login_inside_box .tab .active{color:#0099ee}
+                .bindModal .tab .active::after, .login_inside_box .tab .active::after{content:" ";width:16px;height:4px;line-height:4px;background:#0099ee;border-radius:2px;display:block;margin:0 auto}
+                .d-none{display:none}
+                .img-fluid{max-width:150px;height:auto}
+                .login_inside_box #sendactive{cursor:pointer} input:focus-visible {outline: unset;} .login_inside_box  button:focus {outline: unset !important;}
+                #sendactive2 {cursor: pointer;}
+                .scanCode_box .scanCodeInput {position:relative; outline: none; background:unset;border: none;border-bottom: 1px solid #ddd;box-shadow: none;box-sizing: border-box;transition: all .2s;}
+                .scanCode_box .scanCodeInput::placeholder {color: #ccc;opacity: 1;}
+                .scanCode_box .scanCodeInput:-ms-input-placeholder {color: #ccc;}
+                .scanCode_box .scanCodeInput::-ms-input-placeholder {color: #ccc;}
+                .scanCode_box .scanCodeInput:focus {background: rgba(28, 31, 33, 0.03);border-bottom: 3px solid #0099ee;}
+                .bindModal{position:fixed;background:#fff;z-index:1001;max-width:450px; width:100%; padding-top:24px;padding-bottom:16px;left:50%;top:50%;-webkit-transform:translate(-50%,-50%);-moz-transform:translate(-50%,-50%);-ms-transform:translate(-50%,-50%);transform:translate(-50%,-50%);box-shadow:0 12px 24px 0 rgb(28 31 33 / 10%);border-radius:12px;transition:all .2s;-webkit-transition:all .2s;-moz-transition:all .2s;-o-transition:all .2s}
+                .bindModal .formControl{width:100%;height:48px;line-height:20px;box-sizing:border-box;padding:14px;box-shadow:2px 0 5px 0 #fff;background:rgba(28,31,33,.06);border-radius:8px;border:0}
+                .kx_login_plugbox .btn {border-radius: 50rem;}
+
+                .captcha4refresh, .captcha3refresh {cursor: pointer; color: #0099ee; font-size: 14px;}
+                .layui-layer-btn .layui-layer-btn0 {color: #fff !important;}
+                `));
+                var head = document.getElementsByTagName('head')[0];
+                head.appendChild(style);
+    
+            },
+            // <div class='tabItem' data-idx='2'>验证码登录</div>
+            template: function () {
+                var domHtml = `<div class="kx_login_plugbox" style=" display:none;">
+                    <div class="bg-white login_inside_box" style="border-radius: 5px;">
+                        <div style="position: relative;">
+                            <div class="back px-4 pb-4" style="display:none;">
+                                <div class="d-inline-block backBtn" style="cursor: pointer;">
+                                <svg t="1750127695928" style="vertical-align: middle;" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="116158" width="20" height="20"><path d="M861.7 447.5c-14.9-35-36.1-66.4-63.1-93.4-38.2-38.3-85.4-64.9-139-78.3-23.9-6-48.6-8.1-73.3-8.1H336.8v-83.3c0-12.1-14.1-18.8-23.5-11.2l-162 131.3c-13.7 11.1-13.7 32 0 43.1L313.4 479c9.4 7.6 23.5 0.9 23.5-11.2v-83.3h245.3c92.6 0 175.8 67.3 185.1 159.4 10.7 105.8-73 195.8-176.7 195.8h-337c-32.3 0-58.4 26.2-58.4 58.4 0 32.3 26.2 58.4 58.4 58.4h332.8c24.6 0 49.4-2.1 73.3-8.1 53.6-13.4 100.7-40.1 139-78.3 27-27 48.2-58.4 63.1-93.4 15.5-36.4 23.3-75 23.3-114.7-0.1-39.5-8-78.1-23.4-114.5z m0 0" fill="#0099ee" p-id="116159"></path></svg>
+                                <span style="vertical-align: middle; color:#0099ee; font-weight:bold;">返回</span>
+                                </div>
+                            </div>
+                            <h1 class="tab">
+                                <div class='tabItem active' data-idx='0'>扫码登录</div>
+                                <div class='tabItem' data-idx='1'>密码登录</div>
+                            </h1>
+                            <button type="button" class="close closeLoginBox" data-dismiss="alert" aria-label="Close">×</button>
+                        </div>
+                        <div class="loginInputBox scanCode_box mb-2">
+                            <div class="text-center px-5">
+                                <img src="https://passport.kanxue.com/static/wx_gzh.jpg" alt="扫码登录" class="img-fluid" />
+                            </div>
+                            <div class="text-center">
+                                <p class="mb-0" style="color: #666;">
+                                    <svg t="1750042293046" style="vertical-align: middle;" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="24454" width="20" height="20"><path d="M683.058 364.695c11 0 22 1.016 32.943 1.976C686.564 230.064 538.896 128 370.681 128c-188.104 0.66-342.237 127.793-342.237 289.226 0 93.068 51.379 169.827 136.725 229.256L130.72 748.43l119.796-59.368c42.918 8.395 77.37 16.79 119.742 16.79 11 0 21.46-0.48 31.914-1.442a259.168 259.168 0 0 1-10.455-71.358c0.485-148.002 128.744-268.297 291.403-268.297l-0.06-0.06z m-184.113-91.992c25.99 0 42.913 16.79 42.913 42.575 0 25.188-16.923 42.579-42.913 42.579-25.45 0-51.38-16.85-51.38-42.58 0-25.784 25.93-42.574 51.38-42.574z m-239.544 85.154c-25.384 0-51.374-16.85-51.374-42.58 0-25.784 25.99-42.574 51.374-42.574 25.45 0 42.918 16.79 42.918 42.575 0 25.188-16.924 42.579-42.918 42.579z m736.155 271.655c0-135.647-136.725-246.527-290.983-246.527-162.655 0-290.918 110.88-290.918 246.527 0 136.128 128.263 246.587 290.918 246.587 33.972 0 68.423-8.395 102.818-16.85l93.809 50.973-25.93-84.677c68.907-51.93 120.286-119.815 120.286-196.033z m-385.275-42.58c-16.923 0-34.452-16.79-34.452-34.179 0-16.79 17.529-34.18 34.452-34.18 25.99 0 42.918 16.85 42.918 34.18 0 17.39-16.928 34.18-42.918 34.18z m188.165 0c-16.984 0-33.972-16.79-33.972-34.179 0-16.79 16.927-34.18 33.972-34.18 25.93 0 42.913 16.85 42.913 34.18 0 17.39-16.983 34.18-42.913 34.18z" fill="#09BB07" p-id="24455"></path></svg>
+                                    关注公众号，回复 <code style="font-size:1rem; background:rgba(241, 101, 76, 0.14); color: #f1654c; border-radius: 5px; padding: 2px 5px;">登录</code> 二字获取验证码
+                                </p>
+                            </div>
+                            <div id="loginform3" class="form">
+                                <div class="text-center mt-3">
+                                    <input class="formControl scanCodeInput" type="text" name="code" id="scanCode" placeholder="请输入验证码">
+                                </div>
+                                <div class="text-center mt-3 px-3">
+                                    <button type="button" class="btn btn-block text-white btn-lg j-scan-login" style="background:linear-gradient(135deg,#59c3fb 10%,#268df7 100%);"
+                                        data-loading-text="正在登录..." default-text="登 录">登 录</button>
+                                </div>
+                            </div>
+                            <div class="login-sns my-3 px-3" id="wx_explore" style="display:none;">
+                                <a href="//passport.kanxue.com/wx_user-wx_mobile_login.htm" class="btn btn-lg text-white" style="width: 100%; background: #3c9306;" role="button">
+                                    微信一键登录
+                                </a>
+                            </div>
+                        </div>
+                        <div class="loginInputBox account_box" style="display:none;">
+                            <div id="loginform" class="form">
+                                <div class="form-group input-group mb-4">
+                                    <input class="formControl" type="text" name="account" id="account" autocomplete="off"
+                                        placeholder="用户名&nbsp;/&nbsp;邮箱&nbsp;/&nbsp;手机号 (暂不支持非中国大陆区手机号)">
+                                    <div class="invalid-feedback"></div>
+                                </div>
+                
+                                <div class="form-group input-group mb-4">
+                
+                                    <input class="formControl" type="password" name="password" id="password" placeholder="密码" autocomplete="new-password">
+                                    <div class="invalid-feedback"></div>
+                                </div>
+                
+                                <div id="captcha_div1"><input type="hidden" name="NECaptchaValidate" value="" class="yidun_input"></div>
+                
+                                <div class="form-group">
+                                    <button type="button" class="btn btn-block text-white btn-lg j-login " style="background: #0099ee;"
+                                        data-loading-text="正在登录..." default-text="登 录">登 录</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="loginInputBox mobile_box" style="display:none;">
+                            <div id="loginform2" class="form">
+                                <div class="form-group input-group mb-4">
+                                    <input class="formControl" type="number" name="mobile" id="mobile" placeholder="手机号 (暂不支持非中国大陆区手机号)">
+                                    <div class="invalid-feedback"></div>
+                                </div>
+                                <div class="mb-4" style="height: 40px; line-height: 40px;">
+                                    <div id="captcha_div2"></div>
+                                </div>
+                                <div class="input-group mb-4" style="position: relative;">
+                                    <input type="text" class="formControl" name="verifycode" placeholder="手机验证码" aria-label="手机验证码" aria-describedby="sendactive">
+                                    <div class="input-group-append" style="position: absolute;right: 14px;top: 12px;font-size: 14px;line-height: 24px;">
+                                        <span id="sendactive" style="color: #0099ee">获取验证码</span>
+                                    </div>
+                                </div>
+                                <div class="alert_tip pb-1" style="color:red;"></div>
+                                <div class="form-group">
+                                    <button type="button" class="btn btn-block text-white btn-lg j-phone-login" style="background: #0099ee;"
+                                        data-loading-text="正在登录..." default-text="登 录">登 录</button>
+                                </div>
+                            </div>
+                        </div>
+                        <dl class="row mx-0" style="padding: 0 32px;">
+                            <dd class="mb-0"><a href="https://passport.kanxue.com/user-findpw.htm" class="text-muted mr-3"><small>忘记密码？</small></a></dd>
+                            <dd class="text-right mb-0 col px-0"><a href="https://passport.kanxue.com/user-mobile-1.htm" class="text-muted"><small>注册账号</small></a></dd>
+                        </dl>
+                
+                        <div class="login-sns text-center " id="weixin_mobile">
+                            <div class=" text-muted my-0 position-relative">
+                                <hr class=" position-absolute w-100">
+                                <div class="d-inline-block bg-white px-3 position-relative" style="height: 28px; line-height: 28px;">
+                                    使用以下账号登录
+                                </div>
+                            </div>
+                
+                            <a href="javascript:;" class="wechat_login my-2" style="display:none;">
+                                <img src="https://passport.kanxue.com/pc/view/img/wechat_login.png" style="width: 100%; height: 100%;"
+                                    alt="" data-toggle="tooltip" data-placement="top" title=""
+                                    data-original-title="Use Wechat and scan the QR code to login in.">
+                            </a>
+                
+                            <a href="javascript:;" class="github_login my-2">
+                                <img src="https://passport.kanxue.com/pc/view/img/github.png" style="width: 100%; height: 100%;">
+                            </a>
+                            <a href="javascript:;" class="mobile_login my-2 tabItem" data-idx="2">
+                                <svg t="1750043286947"  style="vertical-align: middle;" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="44786" width="42" height="42"><path d="M452.84982 214.849276l110.217241 0c2.451842 0 4.444219-1.986237 4.444219-4.445242l0-3.151783c0-2.451842-1.991354-4.447289-4.444219-4.447289L452.84982 202.804962c-2.451842 0-4.444219 1.995447-4.444219 4.447289l0 3.151783C448.405601 212.863039 450.397979 214.849276 452.84982 214.849276z" fill="#231f20" p-id="44787"></path><path d="M681.419586 241.617943 340.461124 241.617943c-8.896624 0-17.85567 7.66661-17.85567 15.230889l0 413.294954c0 7.565303 8.959046 11.766998 17.85567 11.766998l340.958462 0c8.895601 0 14.56574-4.201695 14.56574-11.766998L695.985326 256.848832C695.98635 249.284553 690.31621 241.617943 681.419586 241.617943z" fill="#231f20" p-id="44788"></path><path d="M510.889701 716.860784c-11.92868 0-23.786753 4.915963-32.222889 13.351076-8.436136 8.436136-13.345959 20.289092-13.345959 32.221866 0 11.927657 4.910846 23.787776 13.345959 32.221866 8.436136 8.435113 20.294209 13.344936 32.222889 13.344936 11.935843 0 23.785729-4.909823 32.221866-13.344936 8.441253-8.43409 13.353123-20.294209 13.353123-32.221866 0-11.932774-4.91187-23.785729-13.353123-32.221866C534.67543 721.776747 522.825545 716.860784 510.889701 716.860784z" fill="#231f20" p-id="44789"></path><path d="M511.972359 0c-282.741549 0-511.951905 229.210355-511.951905 511.951905 0 282.748712 229.210355 511.953951 511.951905 511.953951s511.951905-229.205239 511.951905-511.953951C1023.924264 229.209332 794.713908 0 511.972359 0zM729.441299 813.19483c0 19.208481-12.988826 34.667567-30.230512 34.667567L327.600211 847.862397c-17.247826 0-33.096792-15.458063-33.096792-34.667567L294.503419 211.473389c0-19.208481 15.848966-35.430954 33.096792-35.430954l371.610576 0c17.241686 0 30.230512 16.223496 30.230512 35.430954L729.441299 813.19483z" fill="#231f20" p-id="44790"></path></svg>
+                            </a>
+                        </div>
+                
+                        <div class="mt-2 text-center small" style="padding: 0 32px;">
+                            <input type="checkbox" name="xieyi" id="" checked="" style="vertical-align: middle;">
+                            <span>我已同意</span>
+                            <a class="color0099ee" href="//www.kanxue.com/article-detail-17033.htm" target="_blank">《看雪服务条款》</a>
+                            <a class="color0099ee" href="//www.kanxue.com/article-detail-17032.htm" target="_blank">《看雪课程免责声明》</a>
+                            
+                            <a class="color0099ee" href="//www.kanxue.com/article-detail-17005.htm" target="_blank">《看雪隐私政策》</a>
+                
+                        </div>
+                    </div>
+                    <div class="login-modal-backdrop"></div>
+                   
+                    <div class="bindModal" style="display:none;">
+                        <div class="position-relative">
+                            <h1 class="tab">
+                                <div class='tabItem active' data-idx='1'>手机号绑定</div>
+                                <div class='tabItem' data-idx='2'>账号绑定</div>
+                            </h1>
+                            <button type="button" class="close closeBindMobileBox position-absolute" style="right:1rem; top:-1rem;">×</button>
+                        </div>
+                        <div class="loginInputBox py-3 px-5 bindMobileBox">
+                            <div id="loginform4" class="form">
+                                <div class="form-group input-group mb-4">
+                                    <input class="formControl" type="number" name="mobile" id="bindMobile" placeholder="手机号 (暂不支持非中国大陆区手机号)">
+                                    <div class="invalid-feedback"></div>
+                                </div>
+                                <div class="mb-4 row mx-0" style="height: 40px; line-height: 40px;">
+                                    <div class="col pl-0" id="captcha_div3"></div>
+                                    <div class="captcha3refresh">刷新</div>
+                                </div>
+                                <div class="input-group mb-4" style="position: relative;">
+                                    <input type="text" class="formControl" name="verifycode" placeholder="手机验证码" aria-label="手机验证码" aria-describedby="sendactive">
+                                    <div class="input-group-append" style="position: absolute;right: 14px;top: 12px;font-size: 14px;line-height: 24px;">
+                                        <span id="sendactive2" style="color: #0099ee">获取验证码</span>
+                                    </div>
+                                </div>
+                                <div class="text-center mb-3">
+                                    <p class="text-muted mb-0">首次使用微信验证码登录，请绑定已有帐号。绑定后可一键登录，无需手机号和密码。</p>
+                                </div>
+                                <div class="alert_tip pb-1" style="color:red;"></div>
+                                <div class="form-group">
+                                    <button type="button" class="btn btn-block text-white btn-lg bind-login" data-type="0" style="background: #0099ee;"
+                                        data-loading-text="正在绑定..." default-text="绑定并登录">绑定并登录</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="loginInputBox py-3 px-5 bindAccountBox" style="display:none;">
+                            <div id="loginform5" class="form" >
+                
+                                <div class="form-group input-group mb-4">
+                                    <input class="formControl" type="text" name="account" id="bindAccount" autocomplete="off"
+                                        placeholder="用户名&nbsp;/&nbsp;邮箱&nbsp;/&nbsp;手机号">
+                                    <div class="invalid-feedback"></div>
+                                </div>
+                
+                                <div class="form-group input-group mb-4">
+                
+                                    <input class="formControl" type="password" name="password" id="bindPassword" placeholder="密码" autocomplete="new-password">
+                                    <div class="invalid-feedback"></div>
+                                </div>
+                                <div class="mb-4 row mx-0" style="height: 40px; line-height: 40px;">
+                                    <div class="col pl-0" id="captcha_div4"></div>
+                                    <div class="captcha4refresh">刷新</div>
+                                </div>
+                                <div class="text-center mb-3">
+                                    <p class="text-muted mb-0">首次使用微信验证码登录，请绑定已有帐号。绑定后可一键登录，无需手机号和密码。</p>
+                                </div>
+                                <div class="alert_tip pb-1" style="color:red;"></div>
+                                <div class="form-group">
+                                    <button type="button" class="btn btn-block text-white btn-lg bind-login" data-type="1" style="background: #0099ee;"
+                                        data-loading-text="正在绑定..." default-text="绑定并登录">绑定并登录</button>
+                                </div>
+                
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+                return domHtml
+            },
+            initNECaptcha: async function () {
+                var captchaIns,captchaIns3;
+                // 账号密码登录
+                var netease = (function () {
+                    var init = function (cid, ele) {
+    
+    
+                        var jaccount,jpassword;
+                        var verify_code_mode = '1';
+                        initNECaptcha({
+                            captchaId: cid,
+                            element: ele,
+                            mode: 'popup',
+                            width: '320px',
+    
+                            onVerify: function (err, data) {
+    
+                                if (err) return  // 当验证失败时，内部会自动refresh方法，无需手动再调用一次
+                                // 点击登录按钮后可调用服务端接口，以下为伪代码，仅作示例用
+                                var jNECaptchaValidate;
+                                if (verify_code_mode == 1) {
+    
+                                    jNECaptchaValidate = jform.find('input[name="NECaptchaValidate"]').val();
+    
+                                } else if (verify_code_mode == 2) {
+                                    jNECaptchaValidate = $("#private_key").val();
+                                }
+                                var postdata = { account: jaccount.val(), password: md5(jpassword.val()), NECaptchaValidate: jNECaptchaValidate };
+    
+                                jsubmit.button('loading');
+    
+                                setTimeout(function () {
+                                    $.xpost('/user-kanxue_login.htm', postdata, function (code, message) {
+                                        if (code == 0) {
+                                            jsubmit.button('登录成功');
+    
+                                            window.location.reload()
+                                        } else if (code == -1) {
+                                            $(".account_box #account").css("border",'1px solid red');
+                                            $(".account_box #password").css("border",'1px solid red');
+                                            jsubmit.button('登录失败');
+                                            $.msg(message);
+                                            setTimeout(function(){
+                                                $(".account_box #account").css("border",'unset');
+                                                $(".account_box #password").css("border",'unset');
+                                                jsubmit.button('reset');
+                                            },1000)
+                                            captchaIns && captchaIns.refresh()
+                                        } else {
+                                            if (code == 1) jaccount.alert(message).focus();
+                                            if (code == 2) jpassword.alert(message).focus();
+    
+                                            jsubmit.button('reset');
+                                            captchaIns && captchaIns.refresh()
+                                        }
+                                    });
+                                }, 1000);
+    
+                            }
+    
+                        }, function onload(instance) {
+                            // 初始化成功
+                            captchaIns = instance
+                        }, function onerror(err) {
+    
+                            // 验证码初始化失败处理逻辑，例如：提示用户点击按钮重新初始化
+                        })
+                        var jform = $('#loginform');
+                        jaccount = jform.find('input[name="account"]');
+                        jpassword = jform.find('input[name="password"]');
+    
+                        var jsubmit = jform.find('button.j-login');
+                        
+    
+                        $(".j-login").off('click').on('click', function () {
+    
+                            if (!jaccount.val()) {
+                                $(".account_box #account").css("border",'1px solid red');
+                                setTimeout(function(){
+                                    $(".account_box #account").css("border",'unset');
+                                },1000)
+                                jaccount.focus();
+                                return false;
+                            } else if (!jpassword.val()) {
+                                $(".account_box #password").css("border",'1px solid red');
+                                setTimeout(function(){
+                                    $(".account_box #password").css("border",'unset');
+                                },1000)
+                                jpassword.focus();
+                                return false;
+                            }
+    
+                            captchaIns && captchaIns.popUp()
+    
+    
+                            return false;
+                        });
+    
+                    }
+                    return { init: init }
+                })();
+                netease.init('e019d55cf18348519c201a0d2f80ebfb', '#captcha_div1');
+    
+    
+                // 验证码组件初始化  float模式 手机验证码登录
+                var netease = (function () {
+                    var init = function (cid, ele) {
+                        initNECaptcha({
+                            captchaId: cid,
+                            element: ele,
+                            mode: 'float',
+                            width: '100%',
+                            float: 'left',
+                            onVerify: function (err, ret) {
+                                if (!err) {}
+                                $(".mobile_box .alert_tip").text('')
+                            }
+                        }, function (instance) {
+                            captchaIns3 = instance
+                            $(".yidun").css("float", "left");
+    
+                        }, function (err) {
+    
+                        });
+                    }
+                    return { init: init }
+                })();
+                netease.init('e019d55cf18348519c201a0d2f80ebfb', '#captcha_div2');
+                var jform2 = $('#loginform2');
+                var jmobile = jform2.find('input[name="mobile"]');
+                var jverifycode = jform2.find('input[name="verifycode"]');
+                
+                var jsubmit = jform2.find('button.j-phone-login');
+    
+                var verify_code_mode2 = 1;
+                $(".j-phone-login").off('click').on('click', function () {
+    
+                    if (!jmobile.val()) {
+                        jmobile.css("border",'1px solid red');
+                        setTimeout(function(){
+                            jmobile.css("border",'unset');
+                        },1000)
+    
+                        jmobile.focus();
+                        return false;
+                    } else if (!jverifycode.val()) {
+                        jverifycode.css("border",'1px solid red');
+                        setTimeout(function(){
+                            jverifycode.css("border",'unset');
+                        },1000)
+                        jverifycode.focus();
+                        return false;
+                    }
+    
+                    let jNECaptchaValidate = jform2.find('input[name="NECaptchaValidate"]').val();
+                    let postdata = { mobile: jmobile.val(), verifycode: jverifycode.val(), NECaptchaValidate: jNECaptchaValidate };
+    
+                    jsubmit.button('loading');
+                    $.xpost('/user-mobile.htm', postdata, function (code, message) {
+                        if (code == 0) {
+                            jsubmit.button('登录成功');
+                            window.location.reload()
+                        } else if (code == -1) {
+                            // $(".mobile_box .alert_tip").text(message)
+                            $.msg(message);
+                            jsubmit.button('reset');
+                        } else if (code == 3) {
+                            $.open({
+                                type: 1,
+                                title:'登录提示',
+                                shadeClose: false,
+                                content: "<div class='px-3 py-2'>" + message + "</div>",
+                                area: ["auto", "auto"],
+                                btn: ['去注册'],
+                                btn1: function(){
+                                    window.location.href = 'https://passport.kanxue.com/user-mobile-1.htm';
+                                }
+                            });
+                        } else {
+                            jsubmit.button('reset');
+                            if (code == 1) {
+                                // $(".mobile_box .alert_tip").text(message)
+                                $.msg(message);
+                                jmobile.focus()
+                                return false
+                            };
+                            if (code == 2) {
+                                // $(".mobile_box .alert_tip").text(message)
+                                $.msg(message);
+                                jverifycode.focus()
+                                return false
+                            };
+                            // $(".mobile_box .alert_tip").text(message)
+                            $.msg(message);
+                        }
+                    });
+                    return false;
+                });
+    
+                var jsendactive = $('#sendactive');
+                jsendactive.on('click', function () {
+    
+                    if (!jmobile.val()) {
+                        jmobile.css("border",'1px solid red');
+                        setTimeout(function(){
+                            jmobile.css("border",'unset');
+                        },1000)
+                        jmobile.focus();
+                        
+                        return false;
+                    }
+                    var jNECaptchaValidate;
+                    if (verify_code_mode2 == 1) {
+                        jNECaptchaValidate = jform2.find('input[name="NECaptchaValidate"]').val();
+                    } else if (verify_code_mode2 == 2) {
+                        jNECaptchaValidate = $("#private_key").val();
+                    }
+                    $.xpost('user-mobile_sendreset.htm', { mobile: jmobile.val(), piccode: jNECaptchaValidate }, function (code, message) {
+                        if (code == 0) {
+                            button_count_down(jsendactive, '发送成功 ({time})', 60);
+                            return;
+                        } else if (code == 1) {
+                            // $(".mobile_box .alert_tip").text(message)
+                            $.msg(message);
+
+                            captchaIns3 && captchaIns3.refresh();
+                            jmobile.focus();
+                        } else {
+                            captchaIns3 && captchaIns3.refresh();
+                            // $(".mobile_box .alert_tip").text(message)
+                            $.msg(message);
+
+
+                        }
+    
+                    });
+                });
+    
+                // 倒计时
+                function button_count_down(jbutton, text, seconds) {
+       
+                    if (window.button_count_down_t) {
+                        $.msg('请勿重复点击，稍后重试');
+                        return;
+                    };
+                    $.msg('已发送验证码，请注意查收');
+                    window.button_count_down_t = setInterval(function () {
+                        if (seconds-- <= 0) {
+                            clearInterval(window.button_count_down_t);
+                            window.button_count_down_t = 0;
+                            jbutton.text('获取验证码');
+                            captchaIns && captchaIns.refresh();
+                            captchaIns1 && captchaIns1.refresh();
+                            captchaIns2 && captchaIns2.refresh();
+                            captchaIns3 && captchaIns3.refresh();
+                            return;
+                        }
+                        var text2 = text.replace('{time}', seconds);
+                        jbutton.text(text2);
+                    }, 1000);
+                }
+
+                // 微信扫码登录
+                $('.j-scan-login').off('click').on('click', function () {
+                    var _this = this;
+                    var jscanCode = $('#scanCode');
+                    if (!jscanCode.val()) {
+                        jscanCode.css("border",'1px solid red');
+                        setTimeout(function(){
+                            jscanCode.css({"border":'none',"border-bottom": "1px solid #ddd"});
+                        },1000)
+                        jscanCode.focus();
+                        return false;
+                    }
+                    var postdata = { code: jscanCode.val() };
+                    $(this).button('loading');
+                    $.xpost('/user-scancode_login.htm', postdata, function (code, message) {
+
+                        if (code == 0) {
+                            window.location.reload()
+                        } else if (code == 1) { 
+                            // 绑定手机号表单弹窗
+                            $('.login_inside_box').hide();
+                            $('.bindModal').show();
+                            $('#loginform2')[0].reset();
+                        } else {
+                            $(_this).button('reset');
+                            $.msg(message);
+                        }
+                    });
+
+                    
+                });
+                let captchaIns1, captchaIns2;
+                let netease2 = (function () {
+                    let init = function (cid, ele) {
+                        initNECaptcha({
+                            captchaId: cid,
+                            element: ele,
+                            mode: 'float',
+                            width: '100%',
+                            float: 'left',
+                            onVerify: function (err, ret) {
+                                if (!err) {}
+                                $(".bindModal .bindMobileBox .alert_tip").text('')
+                            }
+                        }, function (instance) {
+                            // 初始化成功
+                            captchaIns1 = instance
+                            $(".yidun").css("float", "left");
+    
+                        }, function (err) {
+    
+                        });
+                    }
+                    return { init: init }
+                })();
+                netease2.init('e019d55cf18348519c201a0d2f80ebfb', '#captcha_div3');
+                // 绑定手机号验证码刷新
+                $('.captcha3refresh').off('click').on('click', function () {
+                    captchaIns1 && captchaIns1.refresh();
+                });
+                // 发送验证码
+                var verify_code_mode3 = 1;
+                var jsendactive2 = $('#sendactive2');
+                var jform4 = $('#loginform4');
+                var bmobile = jform4.find('input#bindMobile');
+                jsendactive2.on('click', function () {
+                    if (!bmobile.val()) {
+                        bmobile.css("border",'1px solid red');
+                        setTimeout(function(){
+                            bmobile.css("border",'none');
+                        },1000)
+                        bmobile.focus();
+                        
+                        return false;
+                    }
+                    let jNECaptchaValidate;
+                    if (verify_code_mode3 == 1) {
+                        jNECaptchaValidate = jform4.find('input[name="NECaptchaValidate"]').val();
+                    } else if (verify_code_mode3 == 2) {
+                        jNECaptchaValidate = $("#private_key").val();
+                    }
+                    $.xpost('user-mobile_sendreset.htm', { mobile: bmobile.val(), piccode: jNECaptchaValidate }, function (code, message) {
+                        if (code == 0) {
+                            button_count_down(jsendactive2, '发送成功 ({time})', 60);
+                            return;
+                        } else if (code == 1) {
+                            captchaIns1 && captchaIns1.refresh();
+                            // $(".bindModal .bindMobileBox .alert_tip").text(message)
+                            $.msg(message);
+                            bmobile.focus();
+                        } else {
+                            // $(".bindModal .bindMobileBox .alert_tip").text(message)
+                            $.msg(message);
+
+                            captchaIns1 && captchaIns1.refresh();
+                        }
+    
+                    });
+                });
+                // 绑定账号验证
+                let netease3 = (function () {
+                    let init = function (cid, ele) {
+                        initNECaptcha({
+                            captchaId: cid,
+                            element: ele,
+                            mode: 'float',
+                            width: '100%',
+                            float: 'left',
+                            onVerify: function (err, ret) {
+                                if (!err) {}
+                                $(".bindModal .bindAccountBox .alert_tip").text('')
+                            }
+                        }, function (instance) {
+                            // 初始化成功
+                            captchaIns2 = instance
+                            $(".yidun").css("float", "left");
+    
+                        }, function (err) {
+    
+                        });
+                    }
+                    return { init: init }
+                })();
+                netease3.init('e019d55cf18348519c201a0d2f80ebfb', '#captcha_div4');
+                // 绑定账号验证码刷新
+                $('.captcha4refresh').off('click').on('click', function () {
+                    captchaIns2 && captchaIns2.refresh();
+                });
+                function followConfirm(message) {
+                    layer.confirm('通过公众号发送关注码：'+message+'，可获取200雪币', {
+                                title:'温馨提示',
+                                btn: ['确定', '关闭'] //按钮
+                            }, function(){
+                                window.location.href = '//passport.kanxue.com/my-base.htm';
+                            }, function(){
+                                window.location.reload()
+                            });
+                }
+                // 提交绑定手机号
+                $('.bind-login').off('click').on('click', function () {
+                    var _this = this;
+                    var type = $(this).data('type');
+                    var postdata = {};
+                    if (type == 0) {
+                        // 滑块验证
+                        let NECaptchaValidate = $('#loginform4 input[name="NECaptchaValidate"]').val();
+                        if(NECaptchaValidate == undefined || NECaptchaValidate == ''){
+                            $.msg('请先完成滑块验证');
+                            return false;
+                        } 
+                        var bmobile = $('#bindMobile');
+                        var bverifycode = $('#loginform4 input[name="verifycode"]');
+                        if (!bmobile.val()) {
+                            bmobile.css("border",'1px solid red');
+                            setTimeout(function(){
+                                bmobile.css("border",'none');
+                            },1000)
+                            bmobile.focus();
+                            return false;
+                        } else if (!bverifycode.val()) {
+                            bverifycode.css("border",'1px solid red');
+                            setTimeout(function(){
+                                bverifycode.css("border",'none');
+                            },1000)
+                            bverifycode.focus();
+                            return false;
+                        }
+                        
+                        postdata = { login_type: type, mobile: bmobile.val(), verifycode: bverifycode.val(), NECaptchaValidate, code: $('#scanCode').val() };
+                    } else if (type == 1) {
+                        var account = $('#bindAccount');
+                        var password = $('#bindPassword');
+                        // 滑块验证
+                        let NECaptchaValidate = $('#loginform5 input[name="NECaptchaValidate"]').val();
+                        if(NECaptchaValidate == undefined || NECaptchaValidate == ''){
+                            $.msg('请先完成滑块验证');
+                            return false;
+                        } 
+                        if (!account.val()) {
+                            account.css("border",'1px solid red');
+                            setTimeout(function(){
+                                account.css("border",'none');
+                            },1000)
+                            account.focus();
+                            return false;
+                        } else if (!password.val()) {
+                            password.css("border",'1px solid red');
+                            setTimeout(function(){
+                                password.css("border",'none');
+                            },1000)
+                            password.focus();
+                            return false;
+                        }
+                        
+                        postdata = { login_type: type, account: account.val(), password: md5(password.val()), NECaptchaValidate, code: $('#scanCode').val() };
+                    }
+                    $(this).button('loading');
+                    postdata.commet_flag = 0; // 首次提交
+                    $.xpost('/user-bind_login.htm', postdata, function (code, message) {
+                        if (code == 0) {
+                            $(_this).button('绑定成功');
+                            if(message != '') {
+                                // 绑定成功后提示关注公众号
+                                followConfirm(message);
+                            }
+                            
+                        } else if (code == 2) {
+                            // 确认绑定手机号
+                            layer.confirm('此手机号暂未注册，确认注册并绑定？', {
+                                btn: ['确定', '关闭'] //按钮
+                            }, function(){
+                                postdata.commet_flag = 1; // 确认注册
+                                layer.load(1, {
+                                    shade: [0.5, '#000'] //0.1透明度的白色背景
+                                });
+                                $.xpost('/user-bind_login.htm', postdata, function (cod, msg) {
+                                    if (cod == 0) {
+                                        $(_this).button('绑定成功');
+                                        if(msg != '') {
+                                            layer.closeAll();
+                                            // 绑定成功后提示关注公众号
+                                            followConfirm(msg);
+                                        }
+                                    } else {
+                                        $(_this).button('reset');
+                                        $.msg(msg);
+                                        layer.closeAll();
+                                    }
+                                    
+                                });
+                                $(_this).button('reset');
+                            }, function(){
+                                $(_this).button('reset');
+                            });
+                        } else {
+                            $(_this).button('reset');
+                            $.msg(message);
+                        }
+                    });
+                });
+                $('.closeBindMobileBox').on('click', function () {
+                    $('.bindModal').hide();
+                    $('.login_inside_box').show();
+                    captchaIns1 && captchaIns1.refresh();
+                    captchaIns2 && captchaIns2.refresh();
+                });
+            }
+        }
+        win.logininPlug = logininPlug;
+        new logininPlug();
+    } catch (error) {
+        
+    }
+
+})(window, document, jQuery);

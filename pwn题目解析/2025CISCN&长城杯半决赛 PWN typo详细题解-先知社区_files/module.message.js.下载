@@ -1,0 +1,452 @@
+var message = {}
+
+/* 时间戳转成时间格式 */
+function getTime(date, type, fmt) {
+    if(!date){
+        return new Date().toLocaleString()
+    }
+    return new Date(date).toLocaleString()
+    return fmt
+}
+var transTime = function (date) {
+    // match 2018/10/17 01:48:52"
+    if (date.match(/^\d{4}[-/]\d{2}[-/]\d{2} \d{2}:\d{2}:\d{2}$/)) {
+        date = date.replace(/-/g, '/') // for safari
+        // 如果匹配到服务器返回的时间是非标准格式的祖鲁时间，需要进行本地化
+        date = +new Date(date) - timeOffset
+    }
+    return new Date(date)
+}
+var timeTips = function (date) {
+    if (typeof date === 'string') {
+        date = transTime(date)
+    }
+    const time = new Date(date)
+    const offset = (new Date().getTime() - time) / 1000
+
+    if (offset < 60) return trans('time.1分钟内')
+    if (offset < 3600) return ~~(offset / 60) + trans('time.分钟前')
+    if (offset < 3600 * 24) return ~~(offset / 3600) + trans('time.小时前')
+    // 根据 time 获取到 "16:57"
+    let timeStr, dateStr
+    try {
+        timeStr = time.toTimeString().match(/^\d{2}:\d{2}/)[0]
+        dateStr = time
+            .toLocaleDateString() // > "2018/10/19"
+            .replace(/^\d{4}\/(\d{2})\/(\d{2})/, '$1-$2') // > 10-19
+    } catch (e) {
+        // console.warn('time2tips error: ', { date, time }) // eslint-disable-line no-console
+        return ''
+    }
+    if (offset < 3600 * 24 * 2) return trans('time.昨天') + timeStr
+    if (offset < 3600 * 24 * 9) return ~~(offset / 3600 / 24) + trans('time.天前')
+
+    return trans('time.1分钟内')
+}
+
+message = {
+    messages: [],
+    users:{},
+    /*初始化*/
+    init: function () {
+
+    },
+    // 更新用户信息
+    updateUsers: function (id) {
+        var users = getUserInfo(id)
+        message.users = _.mergeWith(_.keyBy(users, 'id'), message.users)
+        $.cookie('message_uids', _.keys(message.users).join(','), 1)
+    },
+    /*创建会话*/
+    createCon: function (uid) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+        checkLogin()
+        message.updateUsers([uid])
+        uid = uid.toString()
+
+        axios.post('/api/v2/chats/room/'+ uid )
+            .then( (res)=> {
+                let roomId = res.data.id
+                var sidehtml =
+                    '<dd class="ms_chat" id="ms_chat_' +
+                    roomId +
+                    '" data-cid="' +
+                    roomId +
+                    '" data-name="' +
+                    message.users[uid]['name'] +
+                    '"><a href="javascript:;" onclick="easemob.openChatDialog(0, ' +
+                    roomId +
+                    ', ' +
+                    uid +
+                    ')"><img src="' +
+                    getAvatar(message.users[uid], 50) +
+                    '"/></a></dd>'
+
+                $('#ms_pinneds').after(sidehtml) //todo  加到哪里的？？
+
+                message.cid = roomId
+                this.openChatDialog(0, roomId, uid)
+            }).catch(function (error) {
+            console.log(error)
+            showError(error.response.data);
+        });
+        return false
+    },
+    openChatDialog: function (type, cid, uid) {
+        sessionStorage.setItem('message_url',window.location.href);
+
+        // let width = document.body.clientWidth
+        // let height = document.body.clientHeight
+        /* 聊天消息*/
+        if (type === 0) {
+            window.open('/messagelc?type=' + type + '&cid=' + cid + '&uid=' + uid)
+            // easemob.setRead(1, cid)
+            // ly.loadNoClose('/message?type=' + type + '&cid=' + cid + '&uid=' + uid, '',
+            //     width+'px', height+'px')
+        } else {
+            window.open('/messagelc?type=' + type)
+            // ly.loadNoClose('/message?type=' + type, '', width+'px', height+'px')
+        }
+    },
+    /* 消息列表 */
+    listMes: function (cid, tit) {
+        // todo  待优化
+        message.updateUsers([TS.MID])
+
+        /*设置房间名*/
+        var title = '<span>' + $('#chat_' + cid).data('name') + '</span>'
+        $('#chat_wrap').data('room', cid)
+        $('#chat_wrap .body_title').html($('#chat_' + cid).data('name') ? title : tit).show()
+        $('#chat_cont').html('')
+        /*查询消息*/
+        axios.get('/api/v2/chats/'+ cid +'/messages')
+            .then(function (res) {
+                if(res.data.length > 0){
+                    res.data.map(function (item,i) {
+                        // 设置消息
+                        if(item.type === 'text'){
+                            values = item.content
+                        }else {
+                            values = item.file
+                        }
+                        message.setMes(values, item.user_id, item.type,  item.created_at)
+
+                        // console.log($('#chat_wrap').data('room'))
+                    })
+                }
+            })
+    },
+    getImageUrl: function(file){
+        if(!file) return false
+
+        return TS.API + '/files/'+ file
+    },
+    /*设置消息*/
+    setMes: function (txt, user_id, mold, message_at) {
+
+        if (mold === 'image') {
+            txt = '<img src="'+message.getImageUrl(txt)+'" class="easemob-msg-img" style="height: 100px"/>'
+        }else {
+            $('#chat_text').val('')
+            if (typeof txt === 'string') {
+                txt = txt.replace(/\r\n/g, '<br>')
+                txt = txt.replace(/\n/g, '<br>')
+            } else {
+                txt = txt.data.replace(/\r\n/g, '<br>')
+                txt = txt.replace(/\n/g, '<br>')
+            }
+        }
+        message_at = getTime(message_at)
+        var html = '';
+        if (parseInt(user_id) === parseInt(window.TS.MID)) {
+            html =
+                '<div class="chatC_right">' +
+                '<img src="' +
+                getAvatar(this.users[user_id]) +
+                '" class="chat_avatar fr">' +
+                (mold == 'img' ? ('<span class="chat_right_img">' + txt + '</span>') : ('<div class="chat-right-box"><p>' + (message_at || '') + '</p><span class="chat_right_body">' + txt + '</span></div>')) +
+                '</div>'
+        } else if (user_id === 'admin') {
+            html = '<div class="chat_notice">' + '<span class="chat_notice_span">' +
+                txt + '</span>' + '</div>'
+        } else {
+            html =
+                '<div class="chatC_left">' +
+                '<a href="'+ TS.SITE_URL+'/users/'+user_id+'"><img src="' +
+                getAvatar(this.users[user_id]) +
+                '" class="chat_avatar"/></a>' +
+                (mold == 'img' ? ('<span class="chat_left_img">' + txt + '</span>') : ('<div class="chat-left-box"><p>' + (message_at || '') + '</p><span class="chat_left_body">' + txt + '</span></div>')) +
+                '</div>'
+        }
+        $('#chat_cont').append(html)
+        var div = document.getElementById('chat_scroll')
+        div.scrollTop = div.scrollHeight
+    },
+    /* 发送消息 */
+    sendMes: function (cid, touid, type) {
+        if (type === 'img') {
+            if (cid < 1) {
+                layer.msg('未获取到应有参数')
+                return false
+            }
+
+            if ($('#chat_img').prop('files').length < 1) {
+                return false
+            }
+            // 选择图片的input
+            var file = $('#chat_img')[0].files[0]
+            try {
+                fileUpload.init(file, function (image, f, file_id) {
+                    message.sendImg(cid, touid, file_id)
+                })
+            }catch (e) {
+                console.log(e)
+                layer.msg('图片上传失败')
+                return false
+            }
+
+        } else {
+            var txt = $.trim($('#chat_text').val())
+            $('#chat_text').val('')
+            if (txt == '') {
+                $('#chat_text').focus()
+                return false
+            }
+            if(txt.length > 500){
+                layer.msg('字数超过限制了哦')
+                return false
+            }
+            message.sendTxt(cid, touid, txt)
+        }
+    },
+    sendTxt: function (cid, touid, txt) {
+        axios.post('/api/v2/chats/'+ cid + '/send-text',{
+            content: txt,
+            type: 'text',
+        })
+            .then(function (res) {
+                checkSideOrder()
+                message.setMes(txt, window.TS.MID,'txt', getTime(new Date()))
+            })
+            .catch(function (error) {
+                console.log(error)
+                showError(error.response.data);
+            })
+
+    },
+    sendImg: function (cid, touid, img) {
+        axios.post('/api/v2/chats/'+ cid + '/send-image',{
+            file: img,
+            type: 'image',
+        })
+            .then(function (res) {
+                checkSideOrder()
+                message.setMes(res.data.file, window.TS.MID,'image',getTime(new Date))
+            })
+            .catch(function (error) {
+                console.log(error)
+            }).finally(function () {
+            $('#chat_img').val('')
+        })
+
+    },
+    /*设置未读聊天消息数量*/
+    setUnreadChat: function (cid, value) {
+        $('#ms_chat_' + cid + ' .unread_div').remove()
+        $('#ms_chat_' + cid).prepend(easemob.formatUnreadHtml(0, value))
+        if ($('.chat_dialog').length > 0) {
+            $('#chat_' + cid + ' .chat_unread_div').remove()
+            $('#chat_' + cid).prepend(easemob.formatUnreadHtml(1, value))
+        }
+    },
+    /*设置未读聊天消息数量*/
+    setUnreadChatInfo: function (cid, value, last_message) {
+        var _this = $('#ms_chat_' + cid)
+        _this.parent().prepend(_this);
+        $('#ms_chat_' + cid + ' .unread_div').remove()
+        if (value > 0) {
+            _this.prepend(easemob.formatUnreadHtml(0, value))
+        }
+        if(last_message.title){
+            last_message.content=last_message.title;
+        }
+        _this.find('.last_content').text(last_message.type == 'image' ? '[图片]' : last_message.content)
+        _this.find('.last_chat_time').text(timeTips(last_message.created_at))
+    },
+    /*获取未读聊天消息数量*/
+    getUnreadChats: function () {
+        axios.get('api/v2/chats')
+            .then(function (res) {
+                _.forEach(res.data, function (value) {
+                    if(value.new > 0){
+                        message.setUnreadChat(value.room_id, value.new)
+                    }
+                })
+            })
+    },
+    checkOuterCon: function (room) {
+        if ($('#ms_chat_' + room.id).length > 0) {
+            return
+        }
+        var _this = this
+        // 聊天对象
+        var toUsers = room.member
+        if (!_this.users[toUsers.id]) {
+            _this.users[toUsers.id] = toUsers
+        }
+        //加v用户显示真实名称
+        var title = toUsers.name
+        if(toUsers.is_vip){
+            title = toUsers.vip_info.true_name
+        }
+        var avatar = getAvatar(_this.users[toUsers.id], 50)
+        var to = toUsers.id
+
+        if (room.last_message && room.last_message.type == 'img') {
+            value.last_message_txt = '[图片]'
+        }
+
+        // 用户添加到消息弹框左侧
+        var chat_cont_style = room.last_message.content ? 'style="line-height: unset; margin-top: 10px;"' : ''
+        var lastTime_html = room.last_message ? '<span class="last_chat_time">' + timeTips(room.last_message.created_at) + '</span>' : ''
+        // 用户头衔
+        var userRanks = getUserRank([toUsers.id])
+        var userRankHtml = ''
+        _.forEach(userRanks,function (Rank) {
+            userRankHtml += '<img class="role-icon" src="'+Rank+'" style="margin-left: 5px;">'
+        })
+
+        if(room.last_message.title){
+            room.last_message.content=room.last_message.title;
+        }
+        var left_sidehtml = '<li data-type="0" ' +
+            ' id="ms_chat_' +
+            room.id +
+            '" data-uid="' +
+            toUsers.id +
+            '" data-cid="' +
+            room.id +
+            '" data-name="' +
+            title + '" ><div class="chat_left_icon">' +
+            '<img src="'+ avatar +'"/>' +
+            '</div>' +
+            '<div class="chat_item">' +
+            '<span class="chat_span" '+ chat_cont_style +'>'+ title + userRankHtml + lastTime_html +
+            '</span>' +
+            '<div class="last_content">'+ room.last_message.content +'</div>' +
+            '</div>' +
+            '</li>'
+
+        $('#chat_left_message ul').append(left_sidehtml)
+    },
+    /*设置左侧会话*/
+    setOuterCon: function ( status, uid, cid ) {
+        var _this = this
+        var type = status ? 1 : 0 //打开消息弹框带此参数
+
+        axios.get('api/v2/chats',{params:{cid}})
+            .then(function (res) {
+                _.forEach(res.data, function (value, key) {
+                    // 聊天对象
+                    var toUsers = value.room.member
+                    if (!_this.users[toUsers.id]) {
+                        _this.users[toUsers.id] = toUsers
+                    }
+                    //加v用户显示真实名称
+                    var title = toUsers.name
+                    if(toUsers.is_vip && toUsers.vip_info && toUsers.vip_info.true_name){
+                        title = toUsers.vip_info.true_name
+                    }
+
+                    var avatar = getAvatar(_this.users[toUsers.id], 50)
+                    var to = toUsers.id
+
+                    if(!type){
+                        var sidehtml =
+                            '<dd class="ms_chat" id="ms_chat_' +
+                            value.room_id +
+                            '" data-cid="' +
+                            value.room_id +
+                            '" data-name="' +
+                            title +
+                            '"><a href="javascript:;" onclick="easemob.openChatDialog(0, ' +
+                            value.room_id +
+                            ', ' +
+                            to +
+                            ')"><img src="' +
+                            avatar +
+                            '"/></a></dd>'
+
+                        $('#ms_fixed').append(sidehtml)
+                    } else {
+                        // console.log(value)
+                        if (value.room.last_message && value.room.last_message.type == 'img') {
+                            value.last_message_txt = '[图片]'
+                        }
+
+                        // 用户添加到消息弹框左侧
+                        var chat_cont_style = value.room.last_message.content ? 'style="line-height: unset; margin-top: 10px;"' : ''
+                        var lastTime_html = value.room.last_message ? '<span class="last_chat_time">' + timeTips(value.room.last_message.created_at) + '</span>' : ''
+                        // 用户头衔
+                        // var userRanks = getUserRank([toUsers.id])
+                        // var userRankHtml = ''
+                        // _.forEach(userRanks,function (Rank) {
+                        //   userRankHtml += '<img class="role-icon" src="'+Rank+'" style="margin-left: 5px;">'
+                        // })
+                        // 用户头衔
+                        var userRanks = {
+                            'is_admin':TS.RESOURCE_URL+'/images/certification_administrator.svg',
+                            'is_developer':TS.RESOURCE_URL+'/images/certification_official.svg',
+                            'is_vip':TS.RESOURCE_URL+'/images/certification_v.svg'
+                        }
+                        var userRankHtml = ''
+                        toUsers.is_admin && (userRankHtml += '<img class="role-icon" src="'+userRanks.is_admin+'" style="margin-left: 5px;">')
+                        toUsers.is_developer && (userRankHtml += '<img class="role-icon" src="'+userRanks.is_developer+'" style="margin-left: 5px;">')
+                        toUsers.is_vip && (userRankHtml += '<img class="role-icon" src="'+userRanks.is_vip+'" style="margin-left: 5px;">')
+
+                        if(value.room.last_message.title){
+                            value.room.last_message.content=value.room.last_message.title;
+                        }
+
+                        var left_sidehtml = '<li data-type="0" ' +
+                            (uid == toUsers.id ? 'class="current_room"' : '' ) +
+                            ' id="ms_chat_' +
+                            value.room_id +
+                            '" data-uid="' +
+                            toUsers.id +
+                            '" data-cid="' +
+                            value.room_id +
+                            '" data-name="' +
+                            title + '" ><div class="chat_left_icon">' +
+                            '<img src="'+ avatar +'"/>' +
+                            '</div>' +
+                            '<div class="chat_item">' +
+                            '<span class="chat_span" '+ chat_cont_style +'>'+ title + userRankHtml + lastTime_html +
+                            '</span>' +
+                            '<div class="last_content">'+ value.room.last_message.content +'</div>' +
+                            '</div>' +
+                            '</li>'
+                        // console.log(left_sidehtml)
+
+                        $('#chat_left_message ul').append(left_sidehtml)
+                    }
+
+                    if(value.new > 0){
+                        message.setUnreadChat(value.room_id, value.new)
+                    }
+                })
+            })
+    }
+}
+// 聊天侧边顺序
+function checkSideOrder(text) {
+    var chatItem = $('#chat_left_message .current_room')
+    if (chatItem) {
+        chatItem.find('.last_chat_time').text(timeTips(new Date()))
+        console.log()
+        chatItem.find('.last_content').html(text)
+        chatItem.prependTo('#chat_left_message ul')
+    }
+}

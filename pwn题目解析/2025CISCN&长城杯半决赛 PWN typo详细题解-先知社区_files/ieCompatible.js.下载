@@ -1,0 +1,48 @@
+/**
+ * ie兼容
+ */
+
+// canvas.toBlob
+if (!HTMLCanvasElement.prototype.toBlob) {
+    Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
+        value: function (callback, type, quality) {
+            var canvas = this;
+            setTimeout(function () {
+                var binStr = atob(canvas.toDataURL(type, quality).split(',')[1]);
+                var len = binStr.length;
+                var arr = new Uint8Array(len);
+
+                for (var i = 0; i < len; i++) {
+                    arr[i] = binStr.charCodeAt(i);
+                }
+
+                callback(new Blob([arr], {type: type || 'image/png'}));
+            });
+        }
+    });
+}
+
+// File
+if (typeof File !== "function") {
+    File = function (chunks, filename, opts) {
+        var _this;
+
+        if (opts === void 0) {
+            opts = {};
+        }
+
+        _this = Blob.call(this, chunks, opts) || this;
+        _this.lastModifiedDate = new Date();
+        _this.lastModified = +_this.lastModifiedDate;
+        _this.name = filename;
+        return _this;
+    };
+    File.prototype = (function () {
+        function fn() {
+        }
+
+        fn.prototype = Blob.prototype;
+        return new fn;
+    }());
+    File.prototype.constructor = Blob;
+}
