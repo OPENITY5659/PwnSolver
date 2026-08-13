@@ -423,11 +423,11 @@ class PwnSolverGUI:
                 return
         
         cmd = build_solve_cmd(
-            WORKSPACE, shlex.quote(wsl_binary),
-            libc=shlex.quote(to_wsl_path(libc)) if libc else '',
-            ld=shlex.quote(to_wsl_path(ld)) if ld else '',
-            remote_host=shlex.quote(remote_host) if remote_host else '',
-            remote_port=shlex.quote(remote_port) if remote_port else '',
+            WORKSPACE, wsl_binary,
+            libc=to_wsl_path(libc) if libc else '',
+            ld=to_wsl_path(ld) if ld else '',
+            remote_host=remote_host if remote_host else '',
+            remote_port=remote_port if remote_port else '',
             timeout=timeout_int,
             adaptive=self.adaptive_var.get(),
         )
@@ -470,7 +470,7 @@ class PwnSolverGUI:
             return
         wsl_binary = shlex.quote(to_wsl_path(binary))
         self.log(f"\n📋 代码审计: {os.path.basename(binary)}", 'bold')
-        cmd = (f"cd {WORKSPACE} && python3 -W ignore -c "
+        cmd = (f"cd {shlex.quote(WORKSPACE)} && python3 -W ignore -c "
                f"\"from pwn_solver.code_auditor import audit_binary; "
                f"audit_binary({wsl_binary})\"")
         threading.Thread(target=lambda: self._run_stream(cmd, 60), daemon=True).start()
@@ -482,7 +482,7 @@ class PwnSolverGUI:
             return
         wsl_binary = shlex.quote(to_wsl_path(binary))
         self.log(f"\n🔍 偏移检测: {os.path.basename(binary)}", 'bold')
-        cmd = (f"cd {WORKSPACE} && python3 -W ignore -c "
+        cmd = (f"cd {shlex.quote(WORKSPACE)} && python3 -W ignore -c "
                f"\"from pwn_solver.gdb_debugger import GdbDebugger; "
                f"g=GdbDebugger({wsl_binary}); print('offset:', g.find_offset())\"")
         threading.Thread(target=lambda: self._run_stream(cmd, 30), daemon=True).start()
@@ -543,7 +543,7 @@ class PwnSolverGUI:
             self.log(f"🌐 远程目标: {remote_host}:{remote_port}", 'info')
         
         # 在后台运行exp
-        cmd = f"cd {WORKSPACE} && {env_prefix}python3 -W ignore {shlex.quote(wsl_exp)}"
+        cmd = f"cd {shlex.quote(WORKSPACE)} && {env_prefix}python3 -W ignore {shlex.quote(wsl_exp)}"
         
         self.shell_btn.config(state='disabled', text="⏳ Shell运行中...")
         self._killed = False  # 重置

@@ -47,6 +47,40 @@ def test_build_solve_cmd():
     assert '--no-adaptive' in cmd2
 
 
+def test_build_solve_cmd_real_world_paths():
+    """真实使用场景: Windows 下载目录 + 中文空格路径, 不得双重引号"""
+    import shlex
+    gui = _import_pwn_gui()
+    # 模拟 GUI 输入: Windows 路径 → to_wsl_path → build_solve_cmd (内部统一 quote)
+    win = 'C:\\Users\\Lenovo\\Downloads\\元旦水友赛\\pwn04'
+    wsl = gui.to_wsl_path(win)
+    assert wsl == '/mnt/c/Users/Lenovo/Downloads/元旦水友赛/pwn04'
+
+    cmd = gui.build_solve_cmd('/mnt/d/CTF Slover/PwnSolver', wsl,
+                              libc='/mnt/c/Users/Lenovo/Downloads/元旦水友赛/libc.so.6')
+    # 命令中不得出现嵌套引号 (之前双重 quote 产生的 ''"'"' 模式)
+    assert "'''" not in cmd
+    assert '"\'"\'' not in cmd
+    # bash 解析后参数正确还原 (无引号残留)
+    tokens = shlex.split(cmd)
+    i = tokens.index('pwn_solver/solver.py') + 1
+    assert tokens[i] == wsl, f"binary 参数被破坏: {tokens[i]!r}"
+    j = tokens.index('-l') + 1
+    assert tokens[j] == '/mnt/c/Users/Lenovo/Downloads/元旦水友赛/libc.so.6'
+    # solver.py 收到的路径不应含引号字符
+    assert "'" not in tokens[i] and "'" not in tokens[j]
+
+
+def test_gui_start_solve_no_pre_quote():
+    """GUI _start_solve 传参不再预 quote (防双重引号)"""
+    import inspect
+    gui = _import_pwn_gui()
+    src = inspect.getsource(gui.PwnSolverGUI._start_solve)
+    # 传参处必须是裸路径 (内部统一 quote)
+    assert 'shlex.quote(wsl_binary)' not in src
+    assert 'build_solve_cmd(' in src
+
+
 def test_exec_prefix():
     gui = _import_pwn_gui()
     prefix = gui.exec_prefix()
