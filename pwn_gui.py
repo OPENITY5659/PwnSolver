@@ -487,19 +487,23 @@ class PwnSolverGUI:
         paned.add(right, stretch='never')
         self.notebook.add(tab_log, text=' 📄 输出日志 ')
         
-        # ---- Tab2: 反汇编预览 (溢出点/漏洞点着色) ----
+        # ---- Tab2: 反编译视图 (伪C F5 / 汇编切换) ----
         tab_disasm = tk.Frame(self.notebook, bg='#1e1e2e')
         disasm_bar = tk.Frame(tab_disasm, bg='#1e1e2e')
         disasm_bar.pack(fill='x', pady=(4, 2))
-        tk.Button(disasm_bar, text="🔍 加载反汇编", command=self._load_disasm,
+        self.disasm_mode = 'c'   # 'c' 伪C (F5) | 'asm' 汇编
+        tk.Button(disasm_bar, text="🖥 伪C (F5)", command=lambda: self._set_disasm_mode('c'),
                 bg='#89b4fa', fg='#1e1e2e', relief='flat', cursor='hand2',
                 font=('Consolas', 9, 'bold')).pack(side='left', padx=3)
-        self.disasm_info = tk.Label(disasm_bar, text="选择 binary 后点击加载",
+        tk.Button(disasm_bar, text="🔧 汇编", command=lambda: self._set_disasm_mode('asm'),
+                bg='#45475a', fg='#cdd6f4', relief='flat', cursor='hand2',
+                font=('Consolas', 9)).pack(side='left', padx=3)
+        self.disasm_info = tk.Label(disasm_bar, text="选择 binary 后自动加载伪 C (main+调用链)",
                 fg='#a6adc8', bg='#1e1e2e', font=('Consolas', 8))
         self.disasm_info.pack(side='left', padx=8)
         self.disasm = scrolledtext.ScrolledText(tab_disasm,
                 bg='#11111b', fg='#cdd6f4', insertbackground='#cdd6f4',
-                font=('Consolas', 9), wrap='none', relief='flat', borderwidth=0)
+                font=('Consolas', 10), wrap='none', relief='flat', borderwidth=0)
         self.disasm.pack(fill='both', expand=True)
         self.disasm.config(state='disabled')
         # 标注颜色
@@ -509,7 +513,10 @@ class PwnSolverGUI:
         self.disasm.tag_configure('canary', foreground='#cba6f7')
         self.disasm.tag_configure('fmt', foreground='#f5c2e7')
         self.disasm.tag_configure('io_leak', foreground='#f9e2af')
-        self.notebook.add(tab_disasm, text=' 🔧 反汇编 ')
+        self.disasm.tag_configure('comment', foreground='#6c7086')
+        self.disasm.tag_configure('func_head', foreground='#89b4fa',
+                                  font=('Consolas', 10, 'bold'))
+        self.notebook.add(tab_disasm, text=' 🖥 伪C视图 ')
         
         # ---- Tab3: 程序实际运行 (不带 exp) ----
         tab_run = tk.Frame(self.notebook, bg='#1e1e2e')
@@ -804,59 +811,96 @@ class PwnSolverGUI:
                f"{shlex.quote(code)}")
         threading.Thread(target=lambda: self._run_stream(cmd, 30), daemon=True).start()
     
-    # ========== 反汇编预览 ==========
+    # ========== 反编译视图 (伪C F5 / 汇编) ==========
+    def _set_disasm_mode(self, mode):
+        self.disasm_mode = mode
+        self._load_disasm()
+    
     def _load_disasm(self):
         binary = self.binary_var.get().strip()
         if not binary:
             messagebox.showerror("错误", "请先选择binary文件!")
             return
         self.disasm_info.config(text="加载中...")
+        mode = getattr(self, 'disasm_mode', 'c')
         
         def worker():
             try:
                 wsl_binary = to_wsl_path(binary)
-                r = subprocess.run(exec_prefix() +
-                    [f"objdump -d -M intel {shlex.quote(wsl_binary)}"],
-                    capture_output=True, text=True,
-                    encoding='utf-8', errors='replace', timeout=60)
-                disasm = r.stdout or r.stderr
-                # 分析经子进程执行 (避免 GUI 进程内 import pwn 与 tkinter 冲突)
-                analysis = {}
-                try:
+                if mode == 'c':
+                    # 伪 C 反编译 (经子进程, main+调用链, plt 不展开)
                     code = (
                         "import json,sys;"
-                        "from pwn_solver.analyzer import BinaryAnalyzer;"
-                        "an=BinaryAnalyzer(sys.argv[1], verbose=False);"
-                        "print(json.dumps({'functions': an.find_interesting_functions()}))"
+                        "from pwn_solver.decompiler import decompile;"
+                        "t,a=decompile(sys.argv[1]);"
+                        "print(json.dumps({'text':t,'annot':a}))"
                     )
-                    r2 = subprocess.run(exec_prefix() + [
+                    r = subprocess.run(exec_prefix() + [
                         f"cd {shlex.quote(WORKSPACE)} && python3 -W ignore -c "
                         f"{shlex.quote(code)} {shlex.quote(wsl_binary)}"],
                         capture_output=True, text=True,
                         encoding='utf-8', errors='replace', timeout=90)
-                    analysis = json.loads(r2.stdout.strip().split('\n')[-1]) \
-                        if r2.stdout.strip() else {}
-                except Exception as e:
-                    self._ui_call(lambda: self.disasm_info.config(
-                        text=f"分析失败: {e}"))
-                annot = build_disasm_annotated(disasm, analysis)
-                self._ui_call(lambda: self._render_disasm(*annot, analysis=analysis))
+                    data = json.loads(r.stdout.strip().split('\n')[-1]) \
+                        if r.stdout.strip() else {}
+                    text = data.get('text', r.stderr[:500])
+                    annot = {int(k): v for k, v in data.get('annot', {}).items()}
+                    self._ui_call(lambda: self._render_disasm(text, annot, mode='c',
+                                                              analysis=None))
+                else:
+                    r = subprocess.run(exec_prefix() +
+                        [f"objdump -d -M intel {shlex.quote(wsl_binary)}"],
+                        capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', timeout=60)
+                    disasm = r.stdout or r.stderr
+                    analysis = {}
+                    try:
+                        code = (
+                            "import json,sys;"
+                            "from pwn_solver.analyzer import BinaryAnalyzer;"
+                            "an=BinaryAnalyzer(sys.argv[1], verbose=False);"
+                            "print(json.dumps({'functions': an.find_interesting_functions()}))"
+                        )
+                        r2 = subprocess.run(exec_prefix() + [
+                            f"cd {shlex.quote(WORKSPACE)} && python3 -W ignore -c "
+                            f"{shlex.quote(code)} {shlex.quote(wsl_binary)}"],
+                            capture_output=True, text=True,
+                            encoding='utf-8', errors='replace', timeout=90)
+                        analysis = json.loads(r2.stdout.strip().split('\n')[-1]) \
+                            if r2.stdout.strip() else {}
+                    except Exception as e:
+                        self._ui_call(lambda: self.disasm_info.config(
+                            text=f"分析失败: {e}"))
+                    annot = build_disasm_annotated(disasm, analysis)
+                    self._ui_call(lambda: self._render_disasm(*annot, mode='asm',
+                                                              analysis=analysis))
             except Exception as e:
                 self._ui_call(lambda: self.disasm_info.config(
-                    text=f"反汇编失败: {e}"))
+                    text=f"加载失败: {e}"))
         
         threading.Thread(target=worker, daemon=True).start()
     
-    def _render_disasm(self, disasm, annot, analysis=None):
+    def _render_disasm(self, disasm, annot, mode='c', analysis=None):
         self.disasm.config(state='normal')
         self.disasm.delete(1.0, tk.END)
         self.disasm.insert(1.0, disasm)
-        for line_no, tag in annot.items():
+        lines = disasm.split('\n')
+        for line_no, tag in (annot or {}).items():
+            if line_no >= len(lines):
+                continue
             self.disasm.tag_add(tag, f'{line_no + 1}.0', f'{line_no + 1}.0 lineend')
+        if mode == 'c':
+            # 伪 C: 函数头行蓝色加粗, 注释行灰色
+            for i, line in enumerate(lines):
+                if line.startswith('void ') and '{' in line:
+                    self.disasm.tag_add('func_head', f'{i + 1}.0', f'{i + 1}.0 lineend')
+                elif line.strip().startswith('//'):
+                    self.disasm.tag_add('comment', f'{i + 1}.0', f'{i + 1}.0 lineend')
         self.disasm.config(state='disabled')
-        hits = [DISASM_TAGS[t].split(' ')[0] for t in sorted(set(annot.values()))]
-        self.disasm_info.config(text=f"标注: {', '.join(hits)}" if hits else "无标注点")
-        # 联动漏洞演示高亮
+        hits = [DISASM_TAGS[t].split(' ')[0] for t in sorted(set((annot or {}).values()))]
+        mode_name = '伪C (main+调用链)' if mode == 'c' else '汇编'
+        self.disasm_info.config(
+            text=f"{mode_name} | 标注: {', '.join(hits)}" if hits else f"{mode_name} | 无标注点")
+        # 联动漏洞演示高亮 (仅汇编模式有 analysis)
         if analysis:
             self._update_vuln_demo_highlight(analysis)
     
