@@ -4,7 +4,7 @@ PwnSolver GUI v2 — 自动PWN解题器前端
 支持: WSL/本机解题、自适应求解器、交互Shell、exp管理、代码审计
 """
 
-import subprocess, sys, os, threading, json, time, re, shlex, datetime
+import subprocess, sys, os, threading, json, time, re, shlex, datetime, queue
 from pathlib import Path
 
 def sanitize(text):
@@ -43,6 +43,143 @@ def open_path(path):
 
 # 彩虹色 (成功命令着色用)
 RAINBOW_COLORS = ['#f38ba8', '#fab387', '#f9e2af', '#a6e3a1', '#89b4fa', '#cba6f7']
+
+# ========= 反汇编标注 (纯函数, 便于测试) =========
+# 标注 tag → 语义
+DISASM_TAGS = {
+    'danger_call': '危险函数调用 (gets/read/scanf/strcpy...)',
+    'overflow':    '溢出点 (read 长度 > 缓冲区)',
+    'win':         'win 函数 / system 调用',
+    'canary':      'canary 存取 (fs:0x28)',
+    'fmt':         '格式化字符串漏洞 (printf 栈缓冲)',
+    'io_leak':     'read+write 栈泄露 (canary/PIE 绕过锚点)',
+}
+
+def build_disasm_annotated(disasm, analysis):
+    """把反汇编文本按行标注 → (disasm, {行号: tag})
+
+    analysis: BinaryAnalyzer.find_interesting_functions() 的结果
+    """
+    annot = {}
+    lines = disasm.split('\n')
+    # 行号 → 地址 (指令行 + 函数头行)
+    line_addr = {}
+    for i, line in enumerate(lines):
+        m = re.match(r'^\s*([0-9a-f]+):', line)
+        if m:
+            line_addr[i] = int(m.group(1), 16)
+            continue
+        m = re.match(r'^([0-9a-f]+)\s+<[^>]+>:', line)
+        if m:
+            line_addr[i] = int(m.group(1), 16)
+    funcs = analysis.get('functions', {}) if analysis else {}
+
+    def mark(addr, tag, radius=0):
+        for i, a in line_addr.items():
+            if a == addr or (0 < radius and addr <= a < addr + radius):
+                annot[i] = tag
+
+    # 1. 危险函数 (PLT 调用行: call <xxx@plt>)
+    danger_syms = {'gets', 'read', 'scanf', '__isoc99_scanf', '__isoc23_scanf',
+                   'strcpy', 'strcat', 'sprintf', 'memcpy', 'memmove', 'gets'}
+    for i, line in enumerate(lines):
+        m = re.search(r'call\s+[0-9a-f]+\s+<([^>]+)@plt>', line)
+        if m and m.group(1) in danger_syms:
+            annot[i] = 'danger_call'
+    # 2. 溢出点 (inner_read_overflow 的函数内 read 调用)
+    overflow_funcs = {o.get('function') for o in funcs.get('inner_overflows', [])}
+    cur_func = None
+    for i, line in enumerate(lines):
+        fm = re.match(r'^[0-9a-f]+\s+<([^>]+)>:', line)
+        if fm:
+            cur_func = fm.group(1)
+        if cur_func in overflow_funcs and re.search(r'call\s+.*<read@plt>', line):
+            annot[i] = 'overflow'
+    # 3. win 函数体与 system 调用
+    win_addrs = []
+    for name, addr in funcs.get('win', []):
+        if isinstance(addr, str) and addr.startswith('0x'):
+            win_addrs.append(int(addr, 16))
+    for name, addr in funcs.get('implied_win', []):
+        if isinstance(addr, str) and addr.startswith('0x'):
+            win_addrs.append(int(addr, 16))
+    for i, line in enumerate(lines):
+        if re.search(r'call\s+.*<system@plt>', line) or \
+                re.search(r'call\s+.*<execve@plt>', line):
+            annot[i] = 'win'
+    for wa in win_addrs:
+        for i, a in line_addr.items():
+            if a == wa:
+                annot[i] = 'win'
+    # 4. canary 存取
+    for i, line in enumerate(lines):
+        if 'fs:0x28' in line or '__stack_chk' in line:
+            annot[i] = 'canary'
+    # 5. fmtstr 漏洞 (fmt_string.funcs 内 printf 调用)
+    fmt_funcs = set((funcs.get('fmt_string') or {}).get('funcs', []))
+    cur_func = None
+    for i, line in enumerate(lines):
+        fm = re.match(r'^[0-9a-f]+\s+<([^>]+)>:', line)
+        if fm:
+            cur_func = fm.group(1)
+        if cur_func in fmt_funcs and re.search(r'call\s+.*<printf@plt>', line):
+            annot[i] = 'fmt'
+    # 6. io_leak 锚点 (read/write 泄露函数)
+    io_func = (funcs.get('io_leak') or {}).get('func')
+    if io_func:
+        cur_func = None
+        for i, line in enumerate(lines):
+            fm = re.match(r'^[0-9a-f]+\s+<([^>]+)>:', line)
+            if fm:
+                cur_func = fm.group(1)
+            if cur_func == io_func and re.search(r'call\s+.*<(?:read|write|__isoc(?:99|23)_scanf)@plt>', line):
+                annot[i] = 'io_leak'
+    return disasm, annot
+
+# ========= 漏洞演示内容 =========
+VULN_DEMO = [
+    ("栈溢出 (Stack Overflow)",
+     "危险: read/gets/scanf 读入超过栈缓冲区大小, 覆盖 saved rbp 与返回地址\n"
+     "利用: ret2win (跳 win 函数) / ret2libc (泄露 libc → system(\"/bin/sh\")) /\n"
+     "      ret2syscall (binary 内 syscall 链) / 栈迁移 (leave;ret → bss)\n"
+     "本项目: analyzer 检测 inner_read_overflow (buf→ret 距离), 模板自动生成链"),
+    ("堆溢出 (Heap Overflow)",
+     "危险: malloc 块内写入越界, 破坏相邻 chunk 的 size/fd 字段\n"
+     "利用: tcache poisoning (改 fd 任意地址分配) / unsorted bin 泄露 libc /\n"
+     "      double free (dup) / UAF (释放后使用函数指针)\n"
+     "本项目: HeapExploit 菜单探测 + func-ptr 覆写原语; 高级链见 heap_exploit.py"),
+    ("格式化字符串 (Format String)",
+     "危险: printf(buf) 格式参数可控 → 任意地址读/写\n"
+     "利用: %p 泄露 (canary/libc/栈) + %n/%hn 写 GOT 或全局变量\n"
+     "本项目: analyzer 检测 printf(栈缓冲) + global_compare (secret 比较),\n"
+     "      FormatStringExploit 自动探测参数偏移并写目标"),
+    ("Canary 绕过",
+     "防护: 栈帧插入随机值 (fs:0x28), 返回前校验\n"
+     "绕过: ① 信息泄露 (write 按长度输出/printf %p) 读出 canary 再原样写回\n"
+     "      ② canary 爆破 (fork 服务端逐字节猜, 低 8 位 0x00)\n"
+     "      ③ 改写 __stack_chk_fail@got (Partial RELRO)\n"
+     "本项目: Ret2LibcHardenedExploit 一轮 leak canary+saved rbp+返回地址"),
+    ("PIE 绕过",
+     "防护: 代码段随机基址, 静态地址失效\n"
+     "绕过: ① 泄露返回地址 (write/puts 带出) → base = leak - 锚点偏移\n"
+     "      ② partial overwrite (低字节覆盖, 页内偏移不变)\n"
+     "      ③ 只使用 libc gadget (libc 基址泄露后与 PIE 无关)\n"
+     "本项目: hardened 模板 leak ret 算 PIE base (call_vuln 锚点)"),
+    ("NX 绕过",
+     "防护: 栈/堆不可执行, shellcode 失效\n"
+     "绕过: ROP 链复用现有代码 (ret2libc/ret2syscall/one_gadget)\n"
+     "本项目: gadget_finder 收集 pop_rdi/ret/syscall + libc 相对偏移"),
+    ("Full RELRO",
+     "防护: GOT 只读, 无法改写函数指针\n"
+     "绕过: 不写 GOT — leak libc 后用 libc 内 gadget 链; 或劫持栈返回地址/\n"
+     "      __free_hook (glibc<2.34) / exit handlers\n"
+     "本项目: ret2libc 链不依赖 GOT 覆写, Full RELRO 下实测可解"),
+    ("FORTIFY",
+     "防护: 编译期检查 read/strcpy 等目标大小, 超限直接 abort\n"
+     "绕过: ① 漏洞点换成 scanf(\"%s\") (glibc 不检查目标大小)\n"
+     "      ② 缓冲区大小对编译器不可见 (参数传递/堆指针)\n"
+     "本项目: io_leak 检测 scanf 型漏洞点并自动利用"),
+]
 
 def classify_line(line):
     """按内容给日志行分类 → tag (纯函数, 便于测试)
@@ -108,8 +245,12 @@ class PwnSolverGUI:
         self._solve_proc = None      # 当前解题进程 (用于停止)
         self._last_exploit_path = None
         self._last_cmd_start = None  # 最后一条命令回显行的起始 index (成功时彩虹着色)
+        self._run_proc = None        # 程序直接运行面板的进程
+        self._ui_queue = queue.Queue()  # worker 线程 → 主线程 UI 调用队列 (tkinter 线程安全)
         
         self._build_ui()
+        # 启动 UI 调用队列泵 (worker 线程不可直接 root.after, Python3.14 tkinter 会抛 RuntimeError)
+        self.root.after(50, self._drain_ui_queue)
         self.log("PwnSolver GUI v2 已启动", 'info')
         self.log('选择binary → 开始解题 → 成功后可交互Shell', 'info')
         self._refresh_exp_list()
@@ -259,10 +400,15 @@ class PwnSolverGUI:
         self.progress = ttk.Progressbar(self.root, mode='indeterminate')
         self.progress.pack(fill='x', padx=20, pady=3)
         
-        # === 双面板: 输出 + exp列表 ===
-        paned = tk.PanedWindow(self.root, orient='horizontal',
+        # === Notebook 四面板: 日志 / 反汇编 / 程序运行 / 漏洞演示 ===
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill='both', expand=True, padx=20, pady=5)
+        
+        # ---- Tab1: 输出日志 + exp列表 ----
+        tab_log = tk.Frame(self.notebook, bg='#1e1e2e')
+        paned = tk.PanedWindow(tab_log, orient='horizontal',
                                bg='#1e1e2e', sashrelief='flat')
-        paned.pack(fill='both', expand=True, padx=20, pady=5)
+        paned.pack(fill='both', expand=True)
         
         # 左: 输出区
         left = tk.Frame(paned, bg='#1e1e2e')
@@ -324,12 +470,103 @@ class PwnSolverGUI:
         
         paned.add(left, stretch='always')
         paned.add(right, stretch='never')
+        self.notebook.add(tab_log, text=' 📄 输出日志 ')
+        
+        # ---- Tab2: 反汇编预览 (溢出点/漏洞点着色) ----
+        tab_disasm = tk.Frame(self.notebook, bg='#1e1e2e')
+        disasm_bar = tk.Frame(tab_disasm, bg='#1e1e2e')
+        disasm_bar.pack(fill='x', pady=(4, 2))
+        tk.Button(disasm_bar, text="🔍 加载反汇编", command=self._load_disasm,
+                bg='#89b4fa', fg='#1e1e2e', relief='flat', cursor='hand2',
+                font=('Consolas', 9, 'bold')).pack(side='left', padx=3)
+        self.disasm_info = tk.Label(disasm_bar, text="选择 binary 后点击加载",
+                fg='#a6adc8', bg='#1e1e2e', font=('Consolas', 8))
+        self.disasm_info.pack(side='left', padx=8)
+        self.disasm = scrolledtext.ScrolledText(tab_disasm,
+                bg='#11111b', fg='#cdd6f4', insertbackground='#cdd6f4',
+                font=('Consolas', 9), wrap='none', relief='flat', borderwidth=0)
+        self.disasm.pack(fill='both', expand=True)
+        self.disasm.config(state='disabled')
+        # 标注颜色
+        self.disasm.tag_configure('danger_call', foreground='#f38ba8')
+        self.disasm.tag_configure('overflow', foreground='#fab387')
+        self.disasm.tag_configure('win', foreground='#a6e3a1')
+        self.disasm.tag_configure('canary', foreground='#cba6f7')
+        self.disasm.tag_configure('fmt', foreground='#f5c2e7')
+        self.disasm.tag_configure('io_leak', foreground='#f9e2af')
+        self.notebook.add(tab_disasm, text=' 🔧 反汇编 ')
+        
+        # ---- Tab3: 程序实际运行 (不带 exp) ----
+        tab_run = tk.Frame(self.notebook, bg='#1e1e2e')
+        run_bar = tk.Frame(tab_run, bg='#1e1e2e')
+        run_bar.pack(fill='x', pady=(4, 2))
+        tk.Button(run_bar, text="▶ 启动程序", command=self._start_run_binary,
+                bg='#a6e3a1', fg='#1e1e2e', relief='flat', cursor='hand2',
+                font=('Consolas', 9, 'bold')).pack(side='left', padx=3)
+        tk.Button(run_bar, text="⏹ 关闭", command=self._stop_run_binary,
+                bg='#f38ba8', fg='#1e1e2e', relief='flat', cursor='hand2',
+                font=('Consolas', 9, 'bold')).pack(side='left', padx=3)
+        self.run_status = tk.Label(run_bar, text="未启动",
+                fg='#a6adc8', bg='#1e1e2e', font=('Consolas', 8))
+        self.run_status.pack(side='left', padx=8)
+        tk.Label(run_bar, text="直接运行 binary 观察真实输入/输出 (不含 exp)",
+                fg='#6c7086', bg='#1e1e2e', font=('Consolas', 8)).pack(side='right', padx=5)
+        self.run_output = scrolledtext.ScrolledText(tab_run,
+                bg='#11111b', fg='#cdd6f4', insertbackground='#cdd6f4',
+                font=('Consolas', 10), wrap='word', relief='flat', borderwidth=0)
+        self.run_output.pack(fill='both', expand=True)
+        run_input_bar = tk.Frame(tab_run, bg='#1e1e2e')
+        run_input_bar.pack(fill='x', pady=(2, 4))
+        self.run_input = tk.Entry(run_input_bar,
+                bg='#313244', fg='#cdd6f4', insertbackground='#cdd6f4',
+                font=('Consolas', 9))
+        self.run_input.pack(side='left', fill='x', expand=True, padx=(0, 3))
+        self.run_input.bind('<Return>', lambda e: self._send_run_input())
+        tk.Button(run_input_bar, text="发送", command=self._send_run_input,
+                bg='#45475a', fg='#cdd6f4', relief='flat',
+                font=('Consolas', 8)).pack(side='right')
+        tk.Button(run_input_bar, text="发送十六进制", command=self._send_run_hex,
+                bg='#45475a', fg='#cdd6f4', relief='flat',
+                font=('Consolas', 8)).pack(side='right', padx=3)
+        self.notebook.add(tab_run, text=' ▶ 程序运行 ')
+        
+        # ---- Tab4: 漏洞情况演示 ----
+        tab_demo = tk.Frame(self.notebook, bg='#1e1e2e')
+        self.demo_text = scrolledtext.ScrolledText(tab_demo,
+                bg='#11111b', fg='#cdd6f4', insertbackground='#cdd6f4',
+                font=('Consolas', 10), wrap='word', relief='flat', borderwidth=0)
+        self.demo_text.pack(fill='both', expand=True)
+        self.demo_text.config(state='disabled')
+        self.demo_text.tag_configure('demo_title', foreground='#a6e3a1',
+                                     font=('Consolas', 10, 'bold'))
+        self.demo_text.tag_configure('demo_body', foreground='#cdd6f4')
+        self.demo_text.tag_configure('demo_hit', foreground='#f9e2af',
+                                     font=('Consolas', 10, 'bold'))
+        self._render_vuln_demo()
+        self.notebook.add(tab_demo, text=' 📚 漏洞演示 ')
         
         # 底部状态栏
         self.status_var = tk.StringVar(value="就绪")
         tk.Label(self.root, textvariable=self.status_var, anchor='w',
                 bg='#2d2d44', fg='#a6adc8',
                 font=('Consolas', 8), padx=10, pady=2).pack(fill='x', side='bottom')
+    
+    # ========== 线程安全的 UI 调用 ==========
+    def _ui_call(self, fn, *args):
+        """worker 线程 → 主线程 UI 调用 (经队列, 避免 tkinter 线程问题)"""
+        self._ui_queue.put((fn, args))
+    
+    def _drain_ui_queue(self):
+        try:
+            while True:
+                fn, args = self._ui_queue.get_nowait()
+                try:
+                    fn(*args)
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
+        self.root.after(50, self._drain_ui_queue)
     
     # ========== 日志 ==========
     def log(self, msg, tag=None):
@@ -402,7 +639,7 @@ class PwnSolverGUI:
                                    encoding='utf-8', errors='replace')
             self._solve_proc = proc
         except Exception as e:
-            self.root.after(0, lambda: self.log(f"[启动失败] {e}", 'error'))
+            self._ui_call(self.log, f"[启动失败] {e}", 'error')
             return -1
         
         stderr_lines = []
@@ -413,7 +650,7 @@ class PwnSolverGUI:
                     return
                 line = sanitize(line.rstrip('\n'))
                 if line:
-                    self.root.after(0, lambda l=line: self._log_line(l))
+                    self._ui_call(self._log_line, line)
         
         def read_stderr():
             for line in iter(proc.stderr.readline, ''):
@@ -435,7 +672,7 @@ class PwnSolverGUI:
         t1.join(timeout=3); t2.join(timeout=3)
         
         if stderr_lines:
-            self.root.after(0, lambda: self._log_stderr(''.join(stderr_lines)))
+            self._ui_call(self._log_stderr, ''.join(stderr_lines))
         
         return proc.returncode
     
@@ -494,7 +731,7 @@ class PwnSolverGUI:
         
         def worker():
             rc = self._run_stream(cmd, timeout=timeout_int + 120)
-            self.root.after(0, lambda: self._on_solve_done(rc))
+            self._ui_call(self._on_solve_done, rc)
         
         threading.Thread(target=worker, daemon=True).start()
     
@@ -510,7 +747,7 @@ class PwnSolverGUI:
             self.shell_btn.config(state='normal', bg='#cba6f7')
             self.status_var.set("解题成功")
             if self.auto_shell_var.get():
-                self.root.after(200, self._open_interactive_shell)
+                self._ui_call(self._open_interactive_shell)
         elif rc is not None:
             self.log(f"\n❌ 退出码: {rc}", 'error')
             self.status_var.set(f"解题失败 (rc={rc})")
@@ -545,6 +782,170 @@ class PwnSolverGUI:
                f"{shlex.quote(code)}")
         threading.Thread(target=lambda: self._run_stream(cmd, 30), daemon=True).start()
     
+    # ========== 反汇编预览 ==========
+    def _load_disasm(self):
+        binary = self.binary_var.get().strip()
+        if not binary:
+            messagebox.showerror("错误", "请先选择binary文件!")
+            return
+        self.disasm_info.config(text="加载中...")
+        
+        def worker():
+            try:
+                wsl_binary = to_wsl_path(binary)
+                r = subprocess.run(exec_prefix() +
+                    [f"objdump -d -M intel {shlex.quote(wsl_binary)}"],
+                    capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=60)
+                disasm = r.stdout or r.stderr
+                # 分析经子进程执行 (避免 GUI 进程内 import pwn 与 tkinter 冲突)
+                analysis = {}
+                try:
+                    code = (
+                        "import json,sys;"
+                        "from pwn_solver.analyzer import BinaryAnalyzer;"
+                        "an=BinaryAnalyzer(sys.argv[1], verbose=False);"
+                        "print(json.dumps({'functions': an.find_interesting_functions()}))"
+                    )
+                    r2 = subprocess.run(exec_prefix() + [
+                        f"cd {shlex.quote(WORKSPACE)} && python3 -W ignore -c "
+                        f"{shlex.quote(code)} {shlex.quote(wsl_binary)}"],
+                        capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', timeout=90)
+                    analysis = json.loads(r2.stdout.strip().split('\n')[-1]) \
+                        if r2.stdout.strip() else {}
+                except Exception as e:
+                    self._ui_call(lambda: self.disasm_info.config(
+                        text=f"分析失败: {e}"))
+                annot = build_disasm_annotated(disasm, analysis)
+                self._ui_call(lambda: self._render_disasm(*annot, analysis=analysis))
+            except Exception as e:
+                self._ui_call(lambda: self.disasm_info.config(
+                    text=f"反汇编失败: {e}"))
+        
+        threading.Thread(target=worker, daemon=True).start()
+    
+    def _render_disasm(self, disasm, annot, analysis=None):
+        self.disasm.config(state='normal')
+        self.disasm.delete(1.0, tk.END)
+        self.disasm.insert(1.0, disasm)
+        for line_no, tag in annot.items():
+            self.disasm.tag_add(tag, f'{line_no + 1}.0', f'{line_no + 1}.0 lineend')
+        self.disasm.config(state='disabled')
+        hits = [DISASM_TAGS[t].split(' ')[0] for t in sorted(set(annot.values()))]
+        self.disasm_info.config(text=f"标注: {', '.join(hits)}" if hits else "无标注点")
+        # 联动漏洞演示高亮
+        if analysis:
+            self._update_vuln_demo_highlight(analysis)
+    
+    # ========== 漏洞演示 ==========
+    def _render_vuln_demo(self):
+        self.demo_text.config(state='normal')
+        self.demo_text.delete(1.0, tk.END)
+        for title, body in VULN_DEMO:
+            self.demo_text.insert(tk.END, f"■ {title}\n", 'demo_title')
+            self.demo_text.insert(tk.END, body + "\n\n", 'demo_body')
+        self.demo_text.config(state='disabled')
+    
+    def _update_vuln_demo_highlight(self, analysis):
+        """按分析结果高亮命中的演示条目标题"""
+        funcs = analysis.get('functions', {})
+        hits = set()
+        if funcs.get('inner_overflows') or funcs.get('dangerous'):
+            hits.add('栈溢出')
+        if (funcs.get('heap_menu') or {}).get('heap_menu'):
+            hits.add('堆溢出')
+        if (funcs.get('fmt_string') or {}).get('fmt_string'):
+            hits.add('格式化字符串')
+        if funcs.get('io_leak', {}).get('io_leak'):
+            hits.add('Canary')
+            hits.add('PIE')
+        self.demo_text.config(state='normal')
+        # 清理旧高亮
+        self.demo_text.tag_remove('demo_hit', 1.0, tk.END)
+        content = self.demo_text.get(1.0, tk.END)
+        for title in hits:
+            start = content.find(f"■ {title}")
+            if start >= 0:
+                line = content[:start].count('\n') + 1
+                self.demo_text.tag_add('demo_hit', f'{line}.0', f'{line}.0 lineend')
+        self.demo_text.config(state='disabled')
+    
+    # ========== 程序实际运行 (不带 exp) ==========
+    def _start_run_binary(self):
+        binary = self.binary_var.get().strip()
+        if not binary:
+            messagebox.showerror("错误", "请先选择binary文件!")
+            return
+        self._stop_run_binary(silent=True)
+        self.run_output.delete(1.0, tk.END)
+        wsl_binary = shlex.quote(to_wsl_path(binary))
+        cmd = f"{wsl_binary}"
+        try:
+            self._run_proc = subprocess.Popen(
+                exec_prefix() + [cmd],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace')
+        except Exception as e:
+            self.run_status.config(text=f"启动失败: {e}")
+            return
+        self.run_status.config(text=f"运行中 (pid={self._run_proc.pid})")
+        self.run_input.focus_set()
+        
+        def reader():
+            for line in iter(self._run_proc.stdout.readline, ''):
+                self._ui_call(self._append_run_output, line)
+            self._ui_call(self._on_run_exit)
+        
+        threading.Thread(target=reader, daemon=True).start()
+    
+    def _append_run_output(self, text):
+        text = sanitize(text)
+        self.run_output.insert(tk.END, text)
+        self.run_output.see(tk.END)
+    
+    def _on_run_exit(self):
+        if getattr(self, '_run_proc', None):
+            rc = self._run_proc.poll()
+            self.run_status.config(text=f"已退出 (rc={rc})")
+            self._run_proc = None
+    
+    def _send_run_input(self):
+        proc = getattr(self, '_run_proc', None)
+        if not proc or proc.poll() is not None:
+            self.run_status.config(text="程序未运行")
+            return
+        text = self.run_input.get()
+        self.run_input.delete(0, tk.END)
+        try:
+            proc.stdin.write(text + '\n')
+            proc.stdin.flush()
+        except Exception as e:
+            self.run_status.config(text=f"发送失败: {e}")
+    
+    def _send_run_hex(self):
+        proc = getattr(self, '_run_proc', None)
+        if not proc or proc.poll() is not None:
+            self.run_status.config(text="程序未运行")
+            return
+        text = self.run_input.get().strip().replace(' ', '')
+        self.run_input.delete(0, tk.END)
+        try:
+            data = bytes.fromhex(text)
+            proc.stdin.buffer.write(data)
+            proc.stdin.buffer.flush()
+        except Exception as e:
+            self.run_status.config(text=f"hex 发送失败: {e}")
+    
+    def _stop_run_binary(self, silent=False):
+        proc = getattr(self, '_run_proc', None)
+        if proc:
+            kill_process_tree(proc)
+            self._run_proc = None
+            if not silent:
+                self.run_status.config(text="已关闭")
+    
     # ========== 自定义命令 ==========
     def _run_custom(self):
         cmd = self.custom_cmd_var.get().strip()
@@ -561,7 +962,7 @@ class PwnSolverGUI:
         
         def worker():
             rc = self._run_stream(cmd, timeout=300)
-            self.root.after(0, lambda: self._on_custom_done(rc))
+            self._ui_call(self._on_custom_done, rc)
         
         threading.Thread(target=worker, daemon=True).start()
     
@@ -661,9 +1062,9 @@ class PwnSolverGUI:
                     return
                 line = sanitize(line.rstrip('\n'))
                 if line:
-                    self.root.after(0, lambda l=line: self.log(l, 'shell'))
+                    self._ui_call(self.log, line, 'shell')
             # 进程结束
-            self.root.after(0, self._on_shell_exit)
+            self._ui_call(self._on_shell_exit)
         
         threading.Thread(target=read_shell, daemon=True).start()
         self.shell_input.focus_set()

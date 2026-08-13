@@ -130,6 +130,50 @@ def test_rainbow_and_custom_cmd_api():
         assert hasattr(g, m), f"missing method: {m}"
 
 
+def test_build_disasm_annotated():
+    """反汇编标注: 危险调用/溢出点/win/canary/fmt 逐行 tag"""
+    gui = _import_pwn_gui()
+    disasm = """000000000040117b <vuln>:
+  401183:\t48 8d 45 e0          \tlea    rax,[rbp-0x20]
+  40118d:\te8 9e fe ff ff       \tcall   401030 <puts@plt>
+  4011a3:\te8 a8 fe ff ff       \tcall   401050 <read@plt>
+  4011a9:\tc9                   \tleave
+  4011aa:\tc3                   \tret
+
+0000000000401156 <win>:
+  401173:\te8 c8 fe ff ff       \tcall   401040 <system@plt>"""
+    analysis = {'functions': {
+        'inner_overflows': [{'function': 'vuln', 'dist_to_ret': 40}],
+        'win': [('win', '0x401156')],
+        'fmt_string': {}, 'io_leak': {}, 'heap_menu': {},
+    }}
+    text, annot = gui.build_disasm_annotated(disasm, analysis)
+    # 行3: read@plt 调用 — danger_call 与 overflow 叠加, overflow 覆盖
+    assert annot.get(3) == 'overflow'
+    assert annot.get(2) is None                   # puts 非危险
+    assert annot.get(8) == 'win'                  # system@plt 调用行
+    assert annot.get(7) == 'win'                  # win 函数入口行
+
+
+def test_vuln_demo_content():
+    """漏洞演示文本覆盖全部类型"""
+    gui = _import_pwn_gui()
+    titles = [t for t, _ in gui.VULN_DEMO]
+    for kw in ['栈溢出', '堆溢出', '格式化字符串', 'Canary', 'PIE', 'NX',
+               'Full RELRO', 'FORTIFY']:
+        assert any(kw in t for t in titles), f"缺少演示条目: {kw}"
+
+
+def test_gui_new_panels_api():
+    """新面板方法存在性"""
+    gui = _import_pwn_gui()
+    g = gui.PwnSolverGUI
+    for m in ['_load_disasm', '_render_disasm', '_render_vuln_demo',
+              '_update_vuln_demo_highlight', '_start_run_binary',
+              '_send_run_input', '_send_run_hex', '_stop_run_binary']:
+        assert hasattr(g, m), f"missing method: {m}"
+
+
 def test_exec_prefix():
     gui = _import_pwn_gui()
     prefix = gui.exec_prefix()
