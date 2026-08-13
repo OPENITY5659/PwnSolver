@@ -5,9 +5,13 @@
 - 只显示 main 及其调用链内的用户函数 (libc/plt 调用不展开)
 - 字符串字面量、调用参数 (rdi/rsi/rdx 简单追踪)、栈变量声明
 - 危险调用/溢出点/canary 校验以注释 + tag 标注
+- 经典加解密算法静态识别 (base64/xor/rot13/hex/AES/MD5/TEA)
 """
+import os
 import re
 import subprocess
+
+_DISASM_CACHE = {}
 
 # 标注 tag 与 GUI 的 DISASM_TAGS 一致
 TAG_DANGER = 'danger_call'
@@ -15,9 +19,81 @@ TAG_OVERFLOW = 'overflow'
 TAG_WIN = 'win'
 TAG_CANARY = 'canary'
 TAG_FMT = 'fmt'
+TAG_CRYPTO = 'crypto'
 
 DANGER_SYMS = {'gets', 'read', 'scanf', '__isoc99_scanf', '__isoc23_scanf',
                'strcpy', 'strcat', 'sprintf', 'memcpy', 'memmove'}
+
+# ========= 经典加解密算法静态识别 =========
+B64_TABLE = b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+B64_TABLE_URL = b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+HEX_TABLE = b'0123456789abcdef'
+AES_SBOX_HEAD = bytes.fromhex('637c777bf26b6fc53001672bfed7ab76')
+MD5_IV = bytes.fromhex('0123456789abcdeffedcba9876543210')   # MD5 初始化常量 (小端序列)
+TEA_DELTA = bytes.fromhex('b979379e')
+
+
+def detect_crypto(disasm, elf):
+    """静态识别经典加解密算法
+
+    返回: [{'type': 'base64'|'xor'|'rot13'|'hex'|'aes'|'md5'|'tea',
+           'desc': '人类可读描述', 'evidence': '证据'}]
+    """
+    found = []
+    data = b''
+    try:
+        data = elf.data or b''
+    except Exception:
+        pass
+
+    # 1. Base64 (标准/URL-safe 字母表)
+    if B64_TABLE in data:
+        off = data.find(B64_TABLE)
+        found.append({'type': 'base64', 'desc': 'Base64 编码/解码',
+                      'evidence': f'标准字母表 @ +0x{off:x}'})
+    elif B64_TABLE_URL in data:
+        off = data.find(B64_TABLE_URL)
+        found.append({'type': 'base64', 'desc': 'Base64 (URL-safe)',
+                      'evidence': f'URL-safe 字母表 @ +0x{off:x}'})
+    # 2. Hex 编码
+    if HEX_TABLE in data and b'%02x' in data.lower():
+        found.append({'type': 'hex', 'desc': 'Hex 编码 ("%02x")',
+                      'evidence': '"%02x" 格式串'})
+    # 3. XOR 加密 (XOR 非零立即数; 排除 xor reg,reg 清零)
+    keys = set()
+    for m in re.finditer(r'xor\s+(?:byte\s+)?ptr\s+\[[^\]]+\],\s*(0x[0-9a-f]+)', disasm, re.I):
+        keys.add(int(m.group(1), 16) & 0xff)
+    for m in re.finditer(r'xor\s+(?:al|bl|cl|dl),\s*(0x[0-9a-f]+)', disasm, re.I):
+        keys.add(int(m.group(1), 16) & 0xff)
+    for m in re.finditer(r'xor\s+(?:e?ax|e?bx|e?cx|e?dx|esi|edi),\s*(0x[0-9a-f]+)', disasm, re.I):
+        k = int(m.group(1), 16)
+        if k:
+            keys.add(k & 0xff if k <= 0xff else k)
+    if keys:
+        found.append({'type': 'xor', 'desc': 'XOR 加密',
+                      'evidence': 'key=' + ', '.join(hex(k) for k in sorted(keys))})
+    # 4. ROT13 (字母范围比较 + ±0xd)
+    has_rot_add = bool(re.search(r'add\s+(?:al|bl|cl|dl),\s*0xd\b', disasm, re.I)) or \
+                  bool(re.search(r'sub\s+(?:al|bl|cl|dl),\s*0xd\b', disasm, re.I))
+    has_alpha_cmp = bool(re.search(r'cmp\s+(?:al|bl|cl|dl),\s*0x(?:61|7a|41|5a)\b', disasm, re.I))
+    if has_rot_add and has_alpha_cmp:
+        found.append({'type': 'rot13', 'desc': 'ROT13 字母轮换',
+                      'evidence': '±0xd + a/z/A/Z 范围比较'})
+    # 5. AES S-box
+    if AES_SBOX_HEAD in data:
+        off = data.find(AES_SBOX_HEAD)
+        found.append({'type': 'aes', 'desc': 'AES 加密 (S-box)',
+                      'evidence': f'S-box 特征序列 @ +0x{off:x}'})
+    # 6. MD5 初始化常量
+    if MD5_IV in data:
+        off = data.find(MD5_IV)
+        found.append({'type': 'md5', 'desc': 'MD5 哈希',
+                      'evidence': f'IV 常量 @ +0x{off:x}'})
+    # 7. TEA 系列 (delta 0x9e3779b9)
+    if TEA_DELTA in data or re.search(r'9e3779b9|61c88647', disasm, re.I):
+        found.append({'type': 'tea', 'desc': 'TEA/XTEA 分组加密',
+                      'evidence': 'delta 0x9e3779b9'})
+    return found
 
 
 def parse_objdump(binary_path):
@@ -25,6 +101,7 @@ def parse_objdump(binary_path):
     r = subprocess.run(['objdump', '-d', '-M', 'intel', binary_path],
                        capture_output=True, text=True, timeout=60)
     disasm = r.stdout
+    _DISASM_CACHE[os.path.abspath(binary_path)] = disasm
     funcs = {}
     cur = None
     for line in disasm.split('\n'):
@@ -274,7 +351,21 @@ def decompile(binary_path, elf_strings=None):
                 emit('}')
                 continue
             # 其余指令 (mov 参数/lea 局部/push/pop/nop 等) 不输出 — 保持伪 C 干净
-        emit('', None)
+        emit('')
+    
+    # 加解密算法识别 (伪 C 顶部标注, 金色)
+    disasm_raw = _DISASM_CACHE.get(os.path.abspath(binary_path), '')
+    crypto = detect_crypto(disasm_raw, elf)
+    if crypto:
+        head_lines = [f'// [加解密识别] {", ".join(c["desc"] for c in crypto)}']
+        for c in crypto:
+            head_lines.append(f'//     {c["desc"]} — {c["evidence"]}')
+        head_lines.append('')
+        shift = len(head_lines)
+        annot = {k + shift: v for k, v in annot.items()}
+        for i in range(shift):
+            annot[i] = TAG_CRYPTO
+        lines_out = head_lines + lines_out
     return '\n'.join(lines_out), annot
 
 

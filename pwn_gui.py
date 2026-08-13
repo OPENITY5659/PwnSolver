@@ -53,6 +53,7 @@ DISASM_TAGS = {
     'canary':      'canary 存取 (fs:0x28)',
     'fmt':         '格式化字符串漏洞 (printf 栈缓冲)',
     'io_leak':     'read+write 栈泄露 (canary/PIE 绕过锚点)',
+    'crypto':      '加解密算法识别 (base64/xor/rot13/hex/AES/MD5/TEA)',
 }
 
 def build_disasm_annotated(disasm, analysis):
@@ -513,6 +514,8 @@ class PwnSolverGUI:
         self.disasm.tag_configure('canary', foreground='#cba6f7')
         self.disasm.tag_configure('fmt', foreground='#f5c2e7')
         self.disasm.tag_configure('io_leak', foreground='#f9e2af')
+        self.disasm.tag_configure('crypto', foreground='#f9e2af',
+                                  font=('Consolas', 10, 'bold'))
         self.disasm.tag_configure('comment', foreground='#6c7086')
         self.disasm.tag_configure('func_head', foreground='#89b4fa',
                                   font=('Consolas', 10, 'bold'))

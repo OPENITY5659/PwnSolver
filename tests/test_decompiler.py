@@ -8,7 +8,7 @@ ROOT = os.path.join(BASE, '..')
 sys.path.insert(0, os.path.join(BASE, '..', 'pwn_solver'))
 sys.path.insert(0, ROOT)
 
-from decompiler import decompile, parse_objdump
+from decompiler import decompile, parse_objdump, detect_crypto
 
 CHALLENGES = os.path.join(ROOT, 'challenges')
 
@@ -54,6 +54,34 @@ def test_decompile_flag_focus():
     assert 'FLAG{fmt_str_pwned}' in text
     assert any(t == 'win' for t in annot.values()), \
         "flag 行应被标注为 win (绿色)"
+
+
+def test_detect_crypto():
+    """加解密识别: base64 字母表 / XOR key / AES S-box / MD5 IV / TEA delta"""
+    from decompiler import (B64_TABLE, AES_SBOX_HEAD, MD5_IV, TEA_DELTA)
+
+    class FakeElf:
+        def __init__(self, data):
+            self.data = data
+
+    # Base64 + XOR (汇编形式 xor edx, 0x41)
+    disasm = "  4011cb:\t83 f2 41             \txor    edx,0x41\n"
+    found = detect_crypto(disasm, FakeElf(B64_TABLE + b'\x00' * 16))
+    types = {c['type'] for c in found}
+    assert 'base64' in types
+    assert 'xor' in types
+    xor_c = [c for c in found if c['type'] == 'xor'][0]
+    assert '0x41' in xor_c['evidence']
+
+    # AES + MD5 + TEA
+    found2 = detect_crypto('', FakeElf(AES_SBOX_HEAD + MD5_IV + TEA_DELTA))
+    types2 = {c['type'] for c in found2}
+    assert 'aes' in types2 and 'md5' in types2 and 'tea' in types2
+
+    # 无加密: 空
+    found3 = detect_crypto('xor eax,eax\nret', FakeElf(b'no crypto here'))
+    assert found3 == [] or all(c['type'] != 'xor' for c in found3), \
+        "xor reg,reg 清零不应误报为加密"
 
 
 def test_decompile_no_libc_expansion():
