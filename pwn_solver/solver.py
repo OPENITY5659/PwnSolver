@@ -12,6 +12,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# 禁止本进程及子进程生成 core dump (崩溃的 pwntools 子进程不再留下 core 文件)
+try:
+    import resource as _resource
+    _resource.setrlimit(_resource.RLIMIT_CORE, (0, 0))
+except Exception:
+    pass
+
 # 确保可以在任何位置导入
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -346,9 +353,10 @@ class PwnSolver:
         return code
     
     def _cleanup_cores(self):
-        """清理core dump文件 (在binary所在目录和cores/)"""
+        """清理core dump文件 (binary目录、当前目录、脚本父目录)"""
         import glob
-        dirs = [os.path.dirname(os.path.abspath(self.binary_path)), '.']
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        dirs = [os.path.dirname(os.path.abspath(self.binary_path)), '.', base]
         for d in dirs:
             for pat in ['core', 'core.*', 'cores/core.*']:
                 for f in glob.glob(os.path.join(d, pat)):
@@ -391,6 +399,7 @@ class PwnSolver:
                     self.log(f"      stderr: {stderr[:200]}")
             # 缓存反馈供自适应循环使用
             self._last_feedback = feedback
+            self._cleanup_cores()  # 测试后也清理 (崩溃可能留下 core)
             return success
         else:
             result = self.exploit.test_local(timeout=timeout)
@@ -398,6 +407,7 @@ class PwnSolver:
                 self.log(f"  [+] 本地测试成功!")
             else:
                 self.log(f"  [-] 本地测试失败")
+            self._cleanup_cores()  # 测试后清理
             return result
     
     def solve(self, use_strategy=True, use_adaptive=True):

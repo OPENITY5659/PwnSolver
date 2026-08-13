@@ -395,7 +395,7 @@ class PwnSolverGUI:
         """流式运行命令 (Windows 经 wsl, WSL 内直接执行)"""
         self._killed = False
         self._solve_proc = None
-        full_cmd = exec_prefix() + [cmd]
+        full_cmd = exec_prefix() + ['ulimit -c 0 2>/dev/null; ' + cmd]
         try:
             proc = subprocess.Popen(full_cmd, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True,
