@@ -29,10 +29,12 @@ def test_decompile_ret2win_pseudo_c():
     assert 'system("/bin/sh")' in text
     # plt 调用不展开 (只有调用行)
     assert 'gets(buf)' in text
-    assert '!危险调用' in text
+    assert '!危险' in text
     assert '@plt' not in text
     # 字符串字面量
     assert 'Enter your name:' in text
+    # 干净伪 C: 无逐条指令注释
+    assert '// endbr64' not in text and '// push' not in text
     # 标注存在
     assert any(t == 'danger_call' for t in annot.values())
 
@@ -44,6 +46,14 @@ def test_decompile_two_stage_menu():
     assert 'void vuln()' in text
     assert '__isoc23_scanf' in text or 'scanf' in text
     assert any(t == 'danger_call' for t in annot.values())
+
+
+def test_decompile_flag_focus():
+    """flag 字符串还原 + 绿色标注 (fmtstr: 类似 flag 的东西直接可见)"""
+    text, annot = decompile(os.path.join(CHALLENGES, 'fmtstr'))
+    assert 'FLAG{fmt_str_pwned}' in text
+    assert any(t == 'win' for t in annot.values()), \
+        "flag 行应被标注为 win (绿色)"
 
 
 def test_decompile_no_libc_expansion():

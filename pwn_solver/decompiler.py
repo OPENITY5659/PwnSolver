@@ -149,7 +149,7 @@ def decompile(binary_path, elf_strings=None):
         if not insns:
             continue
         start_addr = insns[0][0]
-        emit(f'void {fname}() {{   // 0x{start_addr:x}', None)
+        emit(f'void {fname}() {{   // 0x{start_addr:x}')
         # 栈变量声明 (从 lea [rbp-0xNN] 推断缓冲区)
         buf_offs = set()
         for addr, insn, comment in insns:
@@ -157,13 +157,20 @@ def decompile(binary_path, elf_strings=None):
             if m:
                 buf_offs.add(int(m.group(1), 16))
         declared = set()
+        max_off = max(buf_offs, default=0)
         for off in sorted(buf_offs):
-            vname = f'var_{off:x}' if off != max(buf_offs, default=0) else 'buf'
+            vname = 'buf' if off == max_off else f'var_{off:x}'
             if off not in declared:
-                emit(f'    char {vname}[0x{off:x}];   // rbp-0x{off:x}', None)
+                emit(f'    char {vname}[0x{off:x}];')
                 declared.add(off)
         # 寄存器 → 表达式 简单追踪 (rdi/rsi/rdx/rax 参数)
         regs = {}
+        pending_cond = None
+        if_depth = 0
+
+        def indent():
+            return '    ' * (1 + if_depth)
+
         for addr, insn, comment in insns:
             insn_body = insn.split('\t')[-1]
             # 字符串引用 (lea [rip+X] 行的注释给出地址; 注释已去除 '#' 前缀)
@@ -172,7 +179,6 @@ def decompile(binary_path, elf_strings=None):
             if m:
                 cstr = read_cstr(m.group(1))
             tag = None
-            line_txt = ''
             # 1) lea rax,[rip+X] → 字符串
             m = re.match(r'lea\s+([a-z0-9]+),\s*\[rip\+0x([0-9a-f]+)\]', insn_body)
             if m:
@@ -201,10 +207,10 @@ def decompile(binary_path, elf_strings=None):
             m = re.match(r'lea\s+([a-z0-9]+),\s*\[rbp-0x([0-9a-f]+)\]', insn_body)
             if m:
                 off = int(m.group(2), 16)
-                vname = 'buf' if off == max(buf_offs, default=0) else f'var_{off:x}'
+                vname = 'buf' if off == max_off else f'var_{off:x}'
                 regs[m.group(1).lstrip('e')] = vname
                 continue
-            # 3) call
+            # 5) call
             m = re.search(r'call\s+[0-9a-f]+\s*<([^>]+)>', insn_body)
             if m:
                 tgt = m.group(1)
@@ -221,14 +227,20 @@ def decompile(binary_path, elf_strings=None):
                     sym = tgt.split('@')[0]
                     note = ''
                     if sym in DANGER_SYMS:
-                        note = '   // !危险调用'
+                        note = '   // !危险'
                         tag = TAG_DANGER
-                    line_txt = f'    {sym}({args});{note}'
+                    line_txt = f'{indent()}{sym}({args});{note}'
                 elif is_user_func(tgt):
-                    line_txt = f'    {tgt}();'
+                    line_txt = f'{indent()}{tgt}();'
                 else:
-                    line_txt = f'    {tgt}({args});   // 外部'
+                    line_txt = f'{indent()}{tgt}({args});'
+                # flag 相关字符串 → 绿色高亮
+                if 'flag' in line_txt.lower():
+                    tag = TAG_WIN
                 emit(line_txt, tag)
+                # 调用后参数寄存器失效 (避免残留到下一次调用)
+                for r in ('rdi', 'rsi', 'rdx'):
+                    regs.pop(r, None)
                 continue
             # 无符号 call (直接地址)
             m = re.search(r'call\s+([0-9a-f]+)\s*$', insn_body)
@@ -236,34 +248,32 @@ def decompile(binary_path, elf_strings=None):
                 a = int(m.group(1), 16)
                 fn = addr_to_func.get(a)
                 if fn and is_user_func(fn):
-                    emit(f'    {fn}();', None)
-                else:
-                    emit(f'    (0x{a:x})();   // 间接调用', None)
+                    emit(f'{indent()}{fn}();')
                 continue
-            # 4) cmp + 条件跳转
+            # 6) cmp + 条件跳转 → if 结构
             m = re.match(r'cmp\s+(\w+),\s*(0x[0-9a-f]+)', insn_body)
             if m:
-                emit(f'    // if ({m.group(1)} == {m.group(2)})', None)
+                pending_cond = (m.group(1), m.group(2))
                 continue
             m = re.match(r'j(?:e|ne|le|ge|a|b)\s+([0-9a-f]+)', insn_body)
-            if m:
-                emit(f'    // {"jump" if m.group(0).startswith("jmp") else "条件跳转"} → 0x{m.group(1)}', None)
+            if m and pending_cond:
+                op = '==' if m.group(0).startswith('je') else '!='
+                emit(f'{indent()}if ({pending_cond[0]} {op} {pending_cond[1]}) {{')
+                pending_cond = None
+                if_depth += 1
                 continue
-            # 5) canary
+            # 7) canary
             if 'fs:0x28' in insn_body:
-                emit(f'    // canary 校验 (fs:0x28)', TAG_CANARY)
+                emit(f'{indent()}__stack_chk_check();   // canary 校验', TAG_CANARY)
                 continue
-            # 6) 返回
+            # 8) 返回
             if insn_body.startswith('ret'):
-                emit('}', None)
+                while if_depth > 0:
+                    if_depth -= 1
+                    emit('    ' * (1 + if_depth) + '}')
+                emit('}')
                 continue
-            # 7) 存局部变量
-            m = re.search(r'mov\s+BYTE PTR \[rbp[^\]]*\],\s*(0x[0-9a-f]+)', insn_body)
-            if m:
-                emit(f'    // 局部字节写 = {m.group(1)}', None)
-                continue
-            # 8) 其他: 一行注释
-            emit(f'    // {insn_body[:60]}', None)
+            # 其余指令 (mov 参数/lea 局部/push/pop/nop 等) 不输出 — 保持伪 C 干净
         emit('', None)
     return '\n'.join(lines_out), annot
 

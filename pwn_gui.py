@@ -890,11 +890,17 @@ class PwnSolverGUI:
             self.disasm.tag_add(tag, f'{line_no + 1}.0', f'{line_no + 1}.0 lineend')
         if mode == 'c':
             # 伪 C: 函数头行蓝色加粗, 注释行灰色
+            flag_line = None
             for i, line in enumerate(lines):
                 if line.startswith('void ') and '{' in line:
                     self.disasm.tag_add('func_head', f'{i + 1}.0', f'{i + 1}.0 lineend')
                 elif line.strip().startswith('//'):
                     self.disasm.tag_add('comment', f'{i + 1}.0', f'{i + 1}.0 lineend')
+                if flag_line is None and 'flag' in line.lower():
+                    flag_line = i + 1
+            # 自动滚动到第一个 flag 相关行
+            if flag_line:
+                self.disasm.see(f'{flag_line}.0')
         self.disasm.config(state='disabled')
         hits = [DISASM_TAGS[t].split(' ')[0] for t in sorted(set((annot or {}).values()))]
         mode_name = '伪C (main+调用链)' if mode == 'c' else '汇编'
