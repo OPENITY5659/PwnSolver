@@ -119,6 +119,11 @@ def test_classify_line():
     assert gui.classify_line('  [gadgets] 收集所有gadgets...') == 'bold'
     assert gui.classify_line('$ echo hi') == 'cmd'   # $ 开头的 shell 行也视为命令
     assert gui.classify_line('普通输出行') is None
+    # 成功标志行 (用户真实反馈: flag/PWNED_OK/uid 应绿色高亮)
+    assert gui.classify_line('flag{fmt1_percent_n_ok}') == 'success'
+    assert gui.classify_line('PWNED_OK') == 'success'
+    assert gui.classify_line('uid=1000(kaikaixiong) gid=1000(...)') == 'success'
+    assert gui.classify_line('[+] fmtstr exploit SUCCESS!') == 'success'
 
 
 def test_rainbow_and_custom_cmd_api():

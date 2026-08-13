@@ -190,7 +190,8 @@ def classify_line(line):
     if line.startswith('$ ') or line.startswith('$'):
         return 'cmd'
     line_lower = line.lower()
-    if any(k in line for k in ['成功', 'success', '★', 'solved', '✅']):
+    if any(k in line for k in ['成功', '★', 'solved', '✅']) \
+            or any(k in line_lower for k in ['success', 'pwned_ok', 'flag{', 'uid=']):
         return 'success'
     if any(k in line for k in ['失败', 'error', '✗', '❌']):
         return 'error'
@@ -198,7 +199,7 @@ def classify_line(line):
         return 'warning'
     if any(k in line for k in ['📋', '①', '决策', '阶段', 'gadgets', 'seccomp']):
         return 'bold'
-    if any(k in line for k in ['$', '#', '>>>', 'uid=', 'interactive']):
+    if any(k in line for k in ['$', '#', '>>>', 'interactive']):
         return 'shell'
     return None
 
@@ -590,6 +591,13 @@ class PwnSolverGUI:
     
     def _log_line(self, line):
         tag = classify_line(line)
+        self.log(line, tag)
+    
+    def _log_shell_line(self, line):
+        """交互 shell 输出行: 默认紫色, flag/PWNED_OK/uid 成功绿高亮"""
+        tag = classify_line(line)
+        if tag in (None, 'cmd'):
+            tag = 'shell'
         self.log(line, tag)
     
     def log_cmd(self, cmd):
@@ -1076,7 +1084,7 @@ class PwnSolverGUI:
                     return
                 line = sanitize(line.rstrip('\n'))
                 if line:
-                    self._ui_call(self.log, line, 'shell')
+                    self._ui_call(self._log_shell_line, line)
             # 进程结束
             self._ui_call(self._on_shell_exit)
         
