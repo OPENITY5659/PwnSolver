@@ -499,7 +499,8 @@ class BinaryAnalyzer:
         read_size = 0
         func_pattern = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
         read_pattern = re.compile(r'call\s+.*<read@plt>')
-        scanf_pattern = re.compile(r'call\s+.*<__isoc99_scanf@plt>')
+        scanf_pattern = re.compile(r'call\s+.*<__isoc(?:99|23)?_scanf@plt>')
+        gets_pattern = re.compile(r'call\s+.*<gets@plt>')
         mov_edx_pat = re.compile(r'mov\s+edx,\s*(0x[0-9a-fA-F]+)')
         
         order = 0
@@ -521,7 +522,14 @@ class BinaryAnalyzer:
             elif scanf_pattern.search(line):
                 stages.append({'type':'scanf','size':0,'function':current_func,'order':order})
                 order += 1
+            elif gets_pattern.search(line):
+                stages.append({'type':'gets','size':0,'function':current_func,'order':order})
+                order += 1
         
+        # 按执行顺序排序: main 中的阶段 (菜单等) 先执行, 其余按出现顺序
+        stages.sort(key=lambda s: (0 if s['function'] == 'main' else 1, s['order']))
+        for i, s in enumerate(stages):
+            s['order'] = i
         return stages
     
     def _detect_heap_menu(self, disasm):
