@@ -146,6 +146,36 @@ def test_ret2libc_with_poprdi_template_syntax():
     compile(code, '<ret2libc_poprdi>', 'exec')
 
 
+def test_ret2libc_menu_scanf_leak_template_syntax():
+    """pwn04 真实场景: scanf 菜单 + read 溢出 (有 pop_rdi) → leak 模板必须可编译
+
+    回归: menu_prelude() 注入曾在 Stage2 的 8 空格上下文产生 4 空格行导致
+    IndentationError (用户真实使用 pwn04 时发现)
+    """
+    from exploit_templates import Ret2LibcExploit
+    from badchars import auto_detect_libc
+    libc = auto_detect_libc(os.path.join(CHALLENGES, 'ret2libc'))
+    analysis = _mk_analysis()
+    analysis['functions']['input_stages'] = [
+        {'type': 'scanf', 'size': 0, 'function': 'main', 'order': 0},
+        {'type': 'read', 'size': 0x100, 'function': 'vuln', 'order': 1},
+    ]
+    gadgets = {
+        'specific': {'pop_rdi': 0x40120b, 'libc_pop_rdi': 0x11bc7a, 'ret': 0x40101a,
+                     'puts_plt': 0x401074, 'puts_got': 0x404000,
+                     'write_plt': None, 'write_got': None},
+        'pop_rdi_in_binary': True, 'plt': {'puts': 0x401074}, 'arch': 'amd64',
+    }
+    exp = Ret2LibcExploit(binary_path=os.path.join(CHALLENGES, 'ret2libc_final'),
+                          analysis=analysis, gadgets=gadgets,
+                          libc_path=libc, verbose=False)
+    code = exp.generate()
+    assert '菜单选择 (scanf 第一轮)' in code
+    # 两个 stage 的菜单前置都注入
+    assert code.count("p.sendline(b'1')  # 菜单选择") == 2
+    compile(code, '<ret2libc_menu_scanf>', 'exec')
+
+
 def test_fmtstr_template_syntax():
     """FormatStringExploit 模板: 目标注入 + 可编译"""
     from exploit_templates import FormatStringExploit
