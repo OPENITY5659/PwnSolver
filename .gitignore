@@ -1,61 +1,61 @@
-# Python
+# ===== Python =====
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 *.egg-info/
 dist/
 build/
 
-# Virtual environments
+# ===== Virtual environments =====
 venv/
 .venv/
 env/
 
-# IDE
+# ===== IDE / editor =====
 .vscode/
 .idea/
 *.swp
 *.swo
+.gdb_history
 
-# OS
+# ===== OS =====
 .DS_Store
 Thumbs.db
 
-# Archives
+# ===== Archives =====
 _reasonix_archive/
 _archived/
 
-# Core dumps
+# ===== Core dumps =====
 core
 core.*
 cores/
 
-# Temp files
+# ===== Temp files =====
 *.tmp
 tmp*
 
-# PWN binaries (large)
-challenges/*.zip
-*.zip
-
-# Git clutter (shell artifacts)
-", timeout=3)'"
-
-# Reasonix internal
-.reasonix/
-
-# Temp exploit files
-_*.py
-wp_content.txt
-extract_docx.py
-*.so
-test_*
-pwn_challenge
+# ===== PWN challenge build artifacts (compiled binaries) =====
 challenges/ret2win
+challenges/ret2win_stripped
 challenges/ret2libc*
 challenges/rop
 challenges/fmtstr*
 challenges/heap_uaf
 challenges/real_ret2libc*
+challenges/real_ctf_ret2libc
+pwn_challenge
+
+# ===== Generated exploit scripts =====
 exploits/
+_*.py
+/test_*
+*.so
+extract_docx.py
+
+# ===== Archives / large binaries =====
 *.zip
+
+# ===== Reasonix internal =====
+.reasonix/
