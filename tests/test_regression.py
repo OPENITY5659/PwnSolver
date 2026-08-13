@@ -215,6 +215,40 @@ def test_zz955_gated_by_binary_segments():
     compile(code, '<ret2syscall>', 'exec')
 
 
+def test_one_gadget_template_syntax_both_branches():
+    """OneGadgetExploit 两个分支 (有/无 pop_rdi) 生成代码均可编译
+
+    回归: no-output 分支 (无 pop_rdi 时) 曾生成 IndentationError
+    (用户真实使用 fmt1 时发现: if REMOTE_HOST 后缺缩进)
+    """
+    from exploit_templates import OneGadgetExploit
+    from badchars import auto_detect_libc
+    libc = auto_detect_libc(os.path.join(CHALLENGES, 'ret2libc'))
+    base_gadgets = {
+        'specific': {'pop_rdi': 0x40120b, 'libc_pop_rdi': 0x11bc7a, 'ret': 0x40101a,
+                     'libc_ret': 0x289fe, 'puts_plt': 0x401074, 'puts_got': 0x404000},
+        'pop_rdi_in_binary': True, 'plt': {'puts': 0x401074}, 'arch': 'amd64',
+        'one_gadgets': [{'offset': '0xf8723', 'constraints': 'x'}],
+    }
+    # 分支 1: 有 pop_rdi (has_output) — fmt1 类似但 pop_rdi 存在
+    exp = OneGadgetExploit(binary_path=os.path.join(CHALLENGES, 'ret2libc_final'),
+                           analysis=_mk_analysis(), gadgets=base_gadgets,
+                           libc_path=libc, verbose=False)
+    code1 = exp.generate()
+    compile(code1, '<one_gadget_with_poprdi>', 'exec')
+
+    # 分支 2: 无 binary pop_rdi (no-output 分支) — fmt1 真实场景
+    g2 = dict(base_gadgets)
+    g2['specific'] = dict(base_gadgets['specific'], pop_rdi=None)
+    g2['pop_rdi_in_binary'] = False
+    exp2 = OneGadgetExploit(binary_path=os.path.join(CHALLENGES, 'ret2libc'),
+                            analysis=_mk_analysis(), gadgets=g2,
+                            libc_path=libc, verbose=False)
+    code2 = exp2.generate()
+    assert 'No output functions' in code2 or 'one_gadget' in code2
+    compile(code2, '<one_gadget_no_poprdi>', 'exec')
+
+
 def test_io_leak_detection_canary_and_pie():
     """read+write 栈泄露模式检测: canary 题 (rbp帧) 与 scanf型全防护题 (调用者帧)"""
     from analyzer import BinaryAnalyzer
