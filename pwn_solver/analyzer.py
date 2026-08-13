@@ -197,7 +197,50 @@ class BinaryAnalyzer:
             'prng_info': getattr(self, '_prng_info', {}),
             'is_go_binary': getattr(self, '_is_go_binary', False),
             'stack_pivot': getattr(self, '_stack_pivot', {}),
+            'inner_overflows': getattr(self, '_inner_overflows', []),
+            'input_stages': self._detect_input_stages(),
         }
+    
+    def _detect_input_stages(self):
+        """检测多阶段输入模式(如s.s.a.l: read→scanf→read)。"""
+        try:
+            result = subprocess.run(
+                ['objdump', '-d', '-M', 'intel', self.binary_path],
+                capture_output=True, text=True, timeout=15
+            )
+            disasm = result.stdout
+        except:
+            return []
+        
+        stages = []
+        current_func = None
+        read_size = 0
+        func_pattern = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        read_pattern = re.compile(r'call\s+.*<read@plt>')
+        scanf_pattern = re.compile(r'call\s+.*<__isoc99_scanf@plt>')
+        mov_edx_pat = re.compile(r'mov\s+edx,\s*(0x[0-9a-fA-F]+)')
+        
+        order = 0
+        for line in disasm.split('\n'):
+            fm = func_pattern.search(line)
+            if fm:
+                current_func = fm.group(2)
+                continue
+            if current_func is None:
+                continue
+            mm = mov_edx_pat.search(line)
+            if mm:
+                read_size = int(mm.group(1), 16)
+                continue
+            if read_pattern.search(line):
+                stages.append({'type':'read','size':read_size,'function':current_func,'order':order})
+                order += 1
+                read_size = 0
+            elif scanf_pattern.search(line):
+                stages.append({'type':'scanf','size':0,'function':current_func,'order':order})
+                order += 1
+        
+        return stages
     
     def _detect_heap_menu(self, disasm):
         """检测堆菜单题: free/calloc + scanf循环(菜单选择) + bss索引数组
@@ -406,37 +449,134 @@ class BinaryAnalyzer:
         return interesting
     
     def find_buffer_sizes(self):
-        """通过反汇编估计缓冲区大小"""
+        """通过反汇编估计缓冲区大小，包括嵌套函数中的read()溢出"""
         buffers = []
         
         try:
-            # 使用objdump查找sub rsp, XXX 指令
             result = subprocess.run(
                 ['objdump', '-d', '-M', 'intel', self.binary_path],
                 capture_output=True, text=True, timeout=30
             )
+            disasm = result.stdout
             
             # 搜索函数开头的栈分配
-            for line in result.stdout.split('\n'):
+            for line in disasm.split('\n'):
                 # sub rsp, 0xNN
                 m = re.search(r'sub\s+(rsp|esp),\s*(0x[0-9a-fA-F]+)', line)
                 if m:
                     size = int(m.group(2), 16)
-                    if 0x10 <= size <= 0x2000:  # 合理范围
-                        # 查找所属函数
+                    if 0x10 <= size <= 0x2000:
                         buffers.append({'type': 'stack_frame', 'size': size, 'hex': m.group(2)})
                 
-                # push rbp; mov rbp, rsp; sub rsp, XXX
-                # lea 指令中的偏移
+                # lea/mov 指令中的偏移 (buffer到rbp的距离)
                 m = re.search(r'(?:lea|mov)\s+\w+,\s*\[(?:rbp|ebp|rsp|esp)([+-])(0x[0-9a-fA-F]+)\]', line)
                 if m:
                     offset = int(m.group(2), 16)
                     if offset > 0:
                         buffers.append({'type': 'buffer_offset', 'size': offset, 'hex': m.group(2)})
+            
+            # === 新增: 检测嵌套函数中的read()溢出 ===
+            # 找所有 read(0, rsp+XX, size) 调用，分析size是否超过到ret addr的距离
+            inner_overflows = self._find_inner_read_overflows(disasm)
+            buffers.extend(inner_overflows)
+            
         except Exception:
             pass
         
         return buffers
+    
+    def _find_inner_read_overflows(self, disasm):
+        """检测函数内部read()调用造成的栈溢出。
+        
+        模式: sub rsp, N / push rX ... → read(0, rsp+off, size)
+        计算: 从buffer位置到返回地址的距离是否 < size
+        """
+        overflows = []
+        lines = disasm.split('\n')
+        
+        # 找每个函数: 函数名行 → 收集push和sub → 找read调用
+        func_pattern = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        push_pattern = re.compile(r'\s+push\s+r')
+        sub_pattern = re.compile(r'\s+sub\s+(rsp|esp),\s*(0x[0-9a-fA-F]+)')
+        read_pattern = re.compile(r'.*call.*<read@plt>')
+        # 找read前设置参数的指令: mov edx, size (rdx=第三个参数=count)
+        mov_edx_pattern = re.compile(r'mov\s+e?dx,\s*(0x[0-9a-fA-F]+)')
+        # 找read前设置rsi的指令: lea rsi,[rsp+XX] 或 mov rsi,rsp 等
+        lea_rsi_pattern = re.compile(r'lea\s+(rsi|esi),\s*\[(rsp|esp)\+?(0x[0-9a-fA-F]+)?\]')
+        
+        current_func = None
+        frame_size = 0
+        push_count = 0
+        sub_amount = 0
+        read_size = None
+        read_buf_offset = 0
+        
+        for line in lines:
+            # 检测函数开始
+            fm = func_pattern.search(line)
+            if fm:
+                current_func = fm.group(2)
+                frame_size = 0
+                push_count = 0
+                sub_amount = 0
+                read_size = None
+                read_buf_offset = 0
+                continue
+            
+            if current_func is None:
+                continue
+            
+            # 统计push
+            if push_pattern.search(line):
+                push_count += 1
+                continue
+            
+            # 统计sub rsp
+            sm = sub_pattern.search(line)
+            if sm:
+                sub_amount = int(sm.group(2), 16)
+                continue
+            
+            # 检测mov edx (read的第三个参数 = 读取大小)
+            mm = mov_edx_pattern.search(line)
+            if mm and read_size is None:
+                read_size = int(mm.group(1), 16)
+                continue
+            
+            # 检测lea rsi (read的第二个参数 = buffer地址)
+            lm = lea_rsi_pattern.search(line)
+            if lm and read_buf_offset == 0:
+                off = lm.group(3)
+                read_buf_offset = int(off, 16) if off else 0
+                continue
+            
+            # 检测call read@plt
+            if read_pattern.search(line) and read_size and current_func != 'main':
+                # 计算: frame_size = push_count*8 + sub_amount
+                # 返回地址在 frame_size 之上
+                # buffer在 rsp + read_buf_offset
+                # 到返回地址的距离 = frame_size - read_buf_offset
+                frame_size = push_count * 8 + sub_amount
+                dist_to_ret = frame_size - read_buf_offset
+                
+                if read_size > dist_to_ret and dist_to_ret > 0:
+                    overflows.append({
+                        'type': 'inner_read_overflow',
+                        'function': current_func,
+                        'frame_size': frame_size,
+                        'buf_offset': read_buf_offset,
+                        'read_size': read_size,
+                        'dist_to_ret': dist_to_ret,
+                        'overflow_bytes': read_size - dist_to_ret,
+                        'pushes': push_count,
+                    })
+                # 重置，可能同一函数有多次read
+                read_size = None
+                read_buf_offset = 0
+        
+        if overflows:
+            self._inner_overflows = overflows
+        return overflows
     
     def disassemble_function(self, func_name):
         """反汇编指定函数"""

@@ -173,16 +173,19 @@ class GadgetFinder:
                      f"ret={'OK' if specific['ret'] else 'NO'}")
             
             # 如果binary中没有，从libc中找
-            if self.libc and not specific['pop_rdi']:
+            if self.libc:
                 try:
                     rop_libc = ROP(self.libc)
-                    if rop_libc.rdi:
+                    if not specific['pop_rdi'] and rop_libc.rdi:
                         specific['pop_rdi'] = rop_libc.rdi.address
                         self.log(f"从libc找到pop_rdi: {hex(specific['pop_rdi'])}")
-                    if rop_libc.rsi:
+                    if not specific['pop_rsi'] and rop_libc.rsi:
                         specific['pop_rsi'] = rop_libc.rsi.address
-                    if rop_libc.rax:
+                    if not specific['pop_rax'] and rop_libc.rax:
                         specific['pop_rax'] = rop_libc.rax.address
+                    if not specific['pop_rdx'] and rop_libc.rdx:
+                        specific['pop_rdx'] = rop_libc.rdx.address
+                        self.log(f"从libc找到pop_rdx: {hex(specific['pop_rdx'])}")
                     if not specific['ret']:
                         for g in rop_libc.gadgets:
                             if str(g).strip() == 'ret':
@@ -215,6 +218,8 @@ class GadgetFinder:
                         specific['pop_rdi'] = addr
                     if not specific['pop_rsi'] and 'pop rsi' in insns and 'ret' in insns and 'call' not in insns:
                         specific['pop_rsi'] = addr
+                    if not specific['pop_rdx'] and 'pop rdx' in insns and 'ret' in insns and 'call' not in insns:
+                        specific['pop_rdx'] = addr
                     if not specific['ret'] and insns == 'ret':
                         specific['ret'] = addr
                     

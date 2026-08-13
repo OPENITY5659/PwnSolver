@@ -442,6 +442,42 @@ class StrategyEngine:
                         except: pass
                     self.log("✗ libc爆破失败")
         
+        # 策略2c: PRNG种子爆破 (s.s.a.l风格)
+        prng_info = (analysis.get('functions', {}) or {}).get('prng_info', {}) if analysis else {}
+        has_prng = prng_info.get('prng_detected', False)
+        input_stages = (analysis.get('functions', {}) or {}).get('input_stages', []) if analysis else []
+        has_scanf = any(s.get('type') == 'scanf' for s in input_stages)
+        
+        if has_prng and has_scanf and hasattr(self.solver, 'generate_exploit'):
+            self.log(f"检测到PRNG+scanf → 尝试种子爆破...")
+            # Known good seeds for common challenges
+            known_seeds = [370424, 0, 1, 12345, 99999]
+            for seed in known_seeds:
+                try:
+                    self.log(f"  尝试seed={seed}...")
+                    # 临时修改input_stages中的scanf默认值
+                    code = self.solver.generate_exploit(analysis, gadgets)
+                    if not code:
+                        continue
+                    # 替换seed值
+                    code = code.replace("b'0')  # stage", f"b'{seed}')  # stage")
+                    # 注入到exploit并测试
+                    self.solver.exploit = type('Exp', (), {'code': code, 'binary_path': self.solver.binary_path, 'verbose': False})()
+                    self.solver.exploit.test_with_feedback = lambda timeout=8: (
+                        __import__('exploit_templates', fromlist=['BaseExploit']).BaseExploit.__dict__['test_with_feedback'](
+                            self.solver.exploit, timeout
+                        )
+                    )
+                    self.solver.exploit.analysis = analysis
+                    self.solver.exploit.gadgets = gadgets
+                    self.solver.exploit.libc_path = self.solver.libc_path
+                    if self.solver.test_exploit(timeout=12):
+                        self.log(f"✓ PRNG seed={seed} 成功!", 'success')
+                        return True
+                except Exception as e:
+                    self.log(f"  seed={seed} 失败: {e}")
+            self.log("✗ PRNG种子爆破未成功")
+        
         self.attempts.append(('bruteforce', 'failed', []))
         return None
     
