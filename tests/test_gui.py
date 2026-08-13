@@ -108,6 +108,28 @@ def test_gui_audit_offset_cmd_building():
     assert r.returncode == 0, f"审计命令执行失败: {r.stderr[:300]}"
 
 
+def test_classify_line():
+    """日志行分类: 命令回显独立 'cmd' 标签 (着色区分)"""
+    gui = _import_pwn_gui()
+    assert gui.classify_line('$ cd /mnt/d && python3 solver.py x') == 'cmd'
+    assert gui.classify_line('$ python3 -c foo') == 'cmd'
+    assert gui.classify_line('✅ 解题成功!') == 'success'
+    assert gui.classify_line('❌ 退出码: 1') == 'error'
+    assert gui.classify_line('  [feedback] ✓ 检测到成功标志') == 'success'
+    assert gui.classify_line('  [gadgets] 收集所有gadgets...') == 'bold'
+    assert gui.classify_line('$ echo hi') == 'cmd'   # $ 开头的 shell 行也视为命令
+    assert gui.classify_line('普通输出行') is None
+
+
+def test_rainbow_and_custom_cmd_api():
+    """彩虹色常量 + 自定义命令/彩虹标记方法存在"""
+    gui = _import_pwn_gui()
+    assert len(gui.RAINBOW_COLORS) >= 6
+    g = gui.PwnSolverGUI
+    for m in ['_run_custom', '_on_custom_done', 'log_cmd', '_mark_rainbow']:
+        assert hasattr(g, m), f"missing method: {m}"
+
+
 def test_exec_prefix():
     gui = _import_pwn_gui()
     prefix = gui.exec_prefix()
@@ -179,7 +201,7 @@ def test_gui_real_instantiation():
         for attr in ['binary_var', 'libc_var', 'ld_var', 'remote_host_var',
                      'timeout_var', 'adaptive_var', 'auto_shell_var',
                      'progress', 'status_var', 'exp_menu', 'exp_listbox',
-                     'output', 'shell_input']:
+                     'output', 'shell_input', 'custom_cmd_var', 'custom_cmd_entry']:
             assert hasattr(g, attr), f"missing attr: {attr}"
         # 模拟输入与纯逻辑调用
         g.binary_var.set(os.path.join(ROOT, 'challenges', 'ret2win'))
@@ -187,6 +209,10 @@ def test_gui_real_instantiation():
         g._refresh_exp_list()
         g.status_var.set("冒烟测试")
         g.log("GUI 冒烟测试 OK", 'info')
+        # 命令回显 + 彩虹标记冒烟
+        start = g.log_cmd('echo rainbow-test')
+        g._mark_rainbow(start)
+        assert g.output.get(start, g.output.index(f'{start} lineend')) == '$ echo rainbow-test'
     finally:
         g.root.destroy()
 

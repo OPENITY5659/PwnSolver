@@ -41,6 +41,30 @@ def open_path(path):
         subprocess.Popen(['xdg-open', path],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+# 彩虹色 (成功命令着色用)
+RAINBOW_COLORS = ['#f38ba8', '#fab387', '#f9e2af', '#a6e3a1', '#89b4fa', '#cba6f7']
+
+def classify_line(line):
+    """按内容给日志行分类 → tag (纯函数, 便于测试)
+
+    返回: 'success' | 'error' | 'warning' | 'bold' | 'shell' | 'cmd' | None
+    cmd = 命令回显行 ($ 开头), 独立于普通 shell 输出以便着色区分
+    """
+    if line.startswith('$ ') or line.startswith('$'):
+        return 'cmd'
+    line_lower = line.lower()
+    if any(k in line for k in ['成功', 'success', '★', 'solved', '✅']):
+        return 'success'
+    if any(k in line for k in ['失败', 'error', '✗', '❌']):
+        return 'error'
+    if any(k in line for k in ['⚠', 'warning', '警告']):
+        return 'warning'
+    if any(k in line for k in ['📋', '①', '决策', '阶段', 'gadgets', 'seccomp']):
+        return 'bold'
+    if any(k in line for k in ['$', '#', '>>>', 'uid=', 'interactive']):
+        return 'shell'
+    return None
+
 def kill_process_tree(proc):
     """杀掉进程树 (bash -c 包装下需连同子进程)"""
     if proc is None:
@@ -83,6 +107,7 @@ class PwnSolverGUI:
         self._shell_proc = None      # 交互shell进程
         self._solve_proc = None      # 当前解题进程 (用于停止)
         self._last_exploit_path = None
+        self._last_cmd_start = None  # 最后一条命令回显行的起始 index (成功时彩虹着色)
         
         self._build_ui()
         self.log("PwnSolver GUI v2 已启动", 'info')
@@ -170,6 +195,23 @@ class PwnSolverGUI:
                 font=('Consolas', 9), activebackground='#1e1e2e',
                 activeforeground='#cba6f7').grid(row=0, column=5, padx=(10,0))
         
+        # 行3: 自定义命令执行
+        row3 = tk.Frame(cfg_frame, bg='#1e1e2e')
+        row3.pack(fill='x', pady=(5,0))
+        tk.Label(row3, text="⌨ 自定义命令:", fg='#a6adc8', bg='#1e1e2e',
+                font=('Consolas', 9)).grid(row=0, column=0, sticky='w', pady=3)
+        self.custom_cmd_var = tk.StringVar()
+        self.custom_cmd_entry = tk.Entry(row3, textvariable=self.custom_cmd_var, width=75,
+                bg='#313244', fg='#cdd6f4', insertbackground='#cdd6f4',
+                font=('Consolas', 9))
+        self.custom_cmd_entry.grid(row=0, column=1, padx=5)
+        self.custom_cmd_entry.bind('<Return>', lambda e: self._run_custom())
+        tk.Button(row3, text="▶ 执行", command=self._run_custom,
+                bg='#89b4fa', fg='#1e1e2e', relief='flat', cursor='hand2',
+                font=('Consolas', 9, 'bold')).grid(row=0, column=2, padx=3)
+        tk.Label(row3, text="(bash 语法, 输出流式进日志)", fg='#6c7086', bg='#1e1e2e',
+                font=('Consolas', 8)).grid(row=0, column=3, sticky='w', padx=5)
+        
         # === 按钮区 ===
         btn_frame = tk.Frame(self.root, bg='#1e1e2e', pady=8)
         btn_frame.pack(fill='x', padx=20)
@@ -239,6 +281,10 @@ class PwnSolverGUI:
         self.output.tag_configure('info', foreground='#89b4fa')
         self.output.tag_configure('bold', foreground='#cdd6f4', font=('Consolas', 10, 'bold'))
         self.output.tag_configure('shell', foreground='#cba6f7')
+        self.output.tag_configure('cmd', foreground='#f9e2af', font=('Consolas', 10, 'bold'))
+        self.output.tag_configure('cmd_success', foreground='#a6e3a1', font=('Consolas', 10, 'bold'))
+        for i, color in enumerate(RAINBOW_COLORS):
+            self.output.tag_configure(f'rainbow{i}', foreground=color)
         
         # 右: exp列表 + shell输入
         right = tk.Frame(paned, bg='#1e1e2e', width=280)
@@ -292,19 +338,27 @@ class PwnSolverGUI:
         self.root.update_idletasks()
     
     def _log_line(self, line):
-        line_lower = line.lower()
-        if any(k in line for k in ['成功', 'success', '★', 'solved', '✅']):
-            self.log(line, 'success')
-        elif any(k in line for k in ['失败', 'error', '✗', '❌']):
-            self.log(line, 'error')
-        elif any(k in line for k in ['⚠', 'warning', '警告']):
-            self.log(line, 'warning')
-        elif any(k in line for k in ['📋', '①', '决策', '阶段', 'gadgets', 'seccomp']):
-            self.log(line, 'bold')
-        elif any(k in line for k in ['$', '#', '>>>', 'uid=', 'interactive']):
-            self.log(line, 'shell')
-        else:
-            self.log(line)
+        tag = classify_line(line)
+        self.log(line, tag)
+    
+    def log_cmd(self, cmd):
+        """记录命令回显行 (金色加粗), 返回行起始 index 供成功后彩虹着色"""
+        start = self.output.index('end-1c linestart')
+        self.log(f"$ {cmd}", 'cmd')
+        self._last_cmd_start = start
+        return start
+    
+    def _mark_rainbow(self, start_index):
+        """把 start_index 起的命令回显行逐字符染成彩虹色 (6 色循环)"""
+        try:
+            line_end = self.output.index(f'{start_index} lineend')
+            text = self.output.get(start_index, line_end)
+            for ch_idx in range(len(text)):
+                tag = f'rainbow{ch_idx % len(RAINBOW_COLORS)}'
+                self.output.tag_add(tag, f'{start_index}+{ch_idx}c',
+                                    f'{start_index}+{ch_idx + 1}c')
+        except Exception:
+            pass
     
     def _log_stderr(self, text):
         text = sanitize(text)[:2000]
@@ -431,7 +485,7 @@ class PwnSolverGUI:
             timeout=timeout_int,
             adaptive=self.adaptive_var.get(),
         )
-        self.log(f"$ {cmd}", 'shell')
+        self.log_cmd(cmd)
         
         self.solve_btn.config(state='disabled', text="⏳ 解题中...")
         self.shell_btn.config(state='disabled')
@@ -449,6 +503,9 @@ class PwnSolverGUI:
         self.solve_btn.config(state='normal', text="🚀 开始解题")
         self._cleanup_cores()
         if rc == 0:
+            # 成功的命令回显 → 彩虹色 (与普通输出区分)
+            if self._last_cmd_start is not None:
+                self._mark_rainbow(self._last_cmd_start)
             self.log("\n✅ 解题成功! 点击 💻交互Shell 获取shell", 'success')
             self.shell_btn.config(state='normal', bg='#cba6f7')
             self.status_var.set("解题成功")
@@ -487,6 +544,38 @@ class PwnSolverGUI:
         cmd = (f"cd {shlex.quote(WORKSPACE)} && python3 -W ignore -c "
                f"{shlex.quote(code)}")
         threading.Thread(target=lambda: self._run_stream(cmd, 30), daemon=True).start()
+    
+    # ========== 自定义命令 ==========
+    def _run_custom(self):
+        cmd = self.custom_cmd_var.get().strip()
+        if not cmd:
+            messagebox.showerror("错误", "请输入要执行的命令!")
+            return
+        self.log(f"\n{'='*50}", 'bold')
+        self.log("⌨ 自定义命令执行", 'bold')
+        self.log(f"{'='*50}", 'bold')
+        self.log_cmd(cmd)
+        self.status_var.set("命令执行中...")
+        self.progress.start(12)
+        self.solve_btn.config(state='disabled', text="⏳ 执行中...")
+        
+        def worker():
+            rc = self._run_stream(cmd, timeout=300)
+            self.root.after(0, lambda: self._on_custom_done(rc))
+        
+        threading.Thread(target=worker, daemon=True).start()
+    
+    def _on_custom_done(self, rc):
+        self.progress.stop()
+        self.solve_btn.config(state='normal', text="🚀 开始解题")
+        if rc == 0:
+            if self._last_cmd_start is not None:
+                self._mark_rainbow(self._last_cmd_start)
+            self.log(f"\n✅ 命令执行成功 (rc={rc})", 'success')
+            self.status_var.set("命令执行成功")
+        else:
+            self.log(f"\n❌ 命令执行失败 (rc={rc})", 'error')
+            self.status_var.set(f"命令执行失败 (rc={rc})")
     
     # ========== 停止 ==========
     def _stop_solve(self):
