@@ -235,9 +235,22 @@ os.makedirs(EXPLOITS_DIR, exist_ok=True)
 class PwnSolverGUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("PwnSolver v2 — 自适应PWN解题器")
-        self.root.geometry("1000x750")
+        self.root.title("PwnSolver v3 — 自适应PWN解题器 (四面板)")
+        self.root.geometry("1000x800")
         self.root.configure(bg='#1e1e2e')
+        
+        # Notebook 深色样式 (让四面板 tab 显眼)
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use('clam')
+        except Exception:
+            pass
+        style.configure('TNotebook', background='#1e1e2e', borderwidth=0)
+        style.configure('TNotebook.Tab', background='#313244', foreground='#cdd6f4',
+                        padding=(14, 6), font=('Consolas', 10, 'bold'))
+        style.map('TNotebook.Tab',
+                  background=[('selected', '#45475a'), ('active', '#3b3d52')],
+                  foreground=[('selected', '#f9e2af')])
         
         self.solver_script = f'{WORKSPACE}/pwn_solver/solver.py'
         self._killed = False
@@ -251,7 +264,8 @@ class PwnSolverGUI:
         self._build_ui()
         # 启动 UI 调用队列泵 (worker 线程不可直接 root.after, Python3.14 tkinter 会抛 RuntimeError)
         self.root.after(50, self._drain_ui_queue)
-        self.log("PwnSolver GUI v2 已启动", 'info')
+        self.log("PwnSolver GUI v3 已启动 (四面板)", 'info')
+        self.log('下半部分四个 tab: 📄输出日志 | 🔧反汇编 | ▶程序运行 | 📚漏洞演示', 'bold')
         self.log('选择binary → 开始解题 → 成功后可交互Shell', 'info')
         self._refresh_exp_list()
     
