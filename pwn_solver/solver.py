@@ -21,6 +21,7 @@ from interactor import BinaryInteractor
 from exploit_templates import (
     Ret2WinExploit,
     Ret2LibcExploit,
+    Ret2LibcHardenedExploit,
     ROPExploit,
     FormatStringExploit,
     ShellcodeExploit,
@@ -235,14 +236,20 @@ class PwnSolver:
             candidates.append(('one_gadget', 95, '有one_gadget可直接getshell'))
             self.log(f"  [+] 候选: one_gadget (置信度: 最高) - 无需pop_rdi")
         
-        # 3. ret2libc - 有pop_rdi时可用
+        # 3. ret2libc - 有pop_rdi时可用; 无防护经典题直接最高优先 (秒杀)
         if has_dangerous and has_leak and protections.get('nx', True):
             if has_pop_rdi:
-                candidates.append(('ret2libc', 85, 'NX+溢出+输出函数+pop_rdi'))
-                self.log(f"  [+] 候选: ret2libc (置信度: 高) - 有pop_rdi")
+                conf = 85
+                if not protections.get('canary') and not protections.get('pie'):
+                    conf = 96  # 经典 ret2libc: 无canary无PIE → 秒杀路径
+                candidates.append(('ret2libc', conf, 'NX+溢出+输出函数+pop_rdi'))
+                self.log(f"  [+] 候选: ret2libc (置信度: {'秒杀' if conf >= 96 else '高'}) - 有pop_rdi")
             else:
-                candidates.append(('ret2libc', 50, 'NX+溢出但无pop_rdi'))
-                self.log(f"  [+] 候选: ret2libc (置信度: 低) - 无pop_rdi!")
+                conf = 50
+                if not protections.get('canary') and not protections.get('pie') and self.libc_path:
+                    conf = 97  # 无 pop_rdi 但本地 libc 可用 (p.libs()+libc gadget) → 秒杀路径
+                candidates.append(('ret2libc', conf, '无pop_rdi(libc gadget)'))
+                self.log(f"  [+] 候选: ret2libc (置信度: {'秒杀' if conf >= 96 else '低'}) - 无pop_rdi!")
         
         # 4. format_string — 升级: 有win但无溢出→fmtstr写secret触发win
         fmt_info = funcs.get('fmt_string') or {}
@@ -308,6 +315,7 @@ class PwnSolver:
         exploit_map = {
             'ret2win': Ret2WinExploit,
             'ret2libc': Ret2LibcExploit,
+            'hardened': Ret2LibcHardenedExploit,
             'rop': ROPExploit,
             'format_string': FormatStringExploit,
             'shellcode': ShellcodeExploit,
@@ -489,8 +497,10 @@ class PwnSolver:
                     self._print_success("ret2syscall (binary gadgets)")
                     return True
             
-            # 3b: one_gadget (无seccomp时)
-            if not heap_menu_active and gadgets.get('one_gadgets') and not has_seccomp:
+            # 3b: one_gadget (无seccomp时) — 经典 ret2libc 特征时跳过 (ret2libc 更快更稳)
+            prefer_ret2libc = (vuln_type[0] == 'ret2libc' and vuln_type[1] >= 90)
+            if not heap_menu_active and gadgets.get('one_gadgets') and not has_seccomp \
+                    and not prefer_ret2libc:
                 self.vuln_type = ('one_gadget', 95, '')
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
@@ -511,6 +521,16 @@ class PwnSolver:
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
                     self._print_success("format_string")
+                    return True
+            
+            # 3e: hardened ret2libc — canary/PIE + read-write 栈泄露模式
+            io_leak = funcs.get('io_leak') or {}
+            if io_leak.get('io_leak') and (protections.get('canary') or protections.get('pie')):
+                self.log("  检测到 read+write 栈泄露 → hardened (canary/PIE 绕过)")
+                self.vuln_type = ('hardened', 90, 'canary/PIE绕过')
+                code = self.generate_exploit(analysis, gadgets)
+                if code and self.test_exploit():
+                    self._print_success("hardened (canary/PIE bypass)")
                     return True
             
             # ====== Step 4: 组合/高级方法 ======

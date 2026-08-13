@@ -6,8 +6,42 @@ Gadget查找模块
 
 import os
 import re
+import json
+import hashlib
 import subprocess
 from pwn import ELF, ROP, p64
+
+_CACHE_DIR = os.path.join(os.path.expanduser('~'), '.pwnsolver_cache')
+
+
+def _disk_cache_get(key):
+    try:
+        p = os.path.join(_CACHE_DIR, key + '.json')
+        if os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def _disk_cache_put(key, value):
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        p = os.path.join(_CACHE_DIR, key + '.json')
+        with open(p, 'w') as f:
+            json.dump(value, f)
+    except Exception:
+        pass
+
+
+def _file_key(path):
+    try:
+        st = os.stat(path)
+        raw = f"{os.path.abspath(path)}:{st.st_mtime_ns}:{st.st_size}".encode()
+        return hashlib.sha1(raw).hexdigest()
+    except Exception:
+        return hashlib.sha1(os.path.abspath(path).encode()).hexdigest()
 
 class GadgetFinder:
     """Gadget查找器"""
@@ -30,12 +64,18 @@ class GadgetFinder:
             print(f"  [gadgets] {msg}", flush=True)
     
     def find_rop_gadgets(self, target=None):
-        """使用ROPgadget查找gadgets"""
+        """使用ROPgadget查找gadgets (磁盘缓存: binary path+mtime+size)"""
+        target = target or self.binary_path
         if 'rop_gadgets' in self._cache:
             return self._cache['rop_gadgets']
         
-        target = target or self.binary_path
         gadgets = []
+        
+        # 磁盘缓存
+        cached = _disk_cache_get('rop_' + _file_key(target))
+        if cached is not None:
+            self._cache['rop_gadgets'] = cached
+            return cached
         
         try:
             self.log(f"运行 ROPgadget --binary {os.path.basename(target)} ...")
@@ -50,6 +90,7 @@ class GadgetFinder:
                     gadgets.append(line)
             
             self.log(f"找到 {len(gadgets)} 个gadgets")
+            _disk_cache_put('rop_' + _file_key(target), gadgets)
         except subprocess.TimeoutExpired:
             self.log("ROPgadget超时")
         except Exception as e:
@@ -59,7 +100,7 @@ class GadgetFinder:
         return gadgets
     
     def find_one_gadgets(self):
-        """使用one_gadget查找execve gadgets"""
+        """使用one_gadget查找execve gadgets (磁盘缓存)"""
         if 'one_gadgets' in self._cache:
             return self._cache['one_gadgets']
         
@@ -69,6 +110,11 @@ class GadgetFinder:
         if not target or not os.path.exists(target):
             self._cache['one_gadgets'] = gadgets
             return gadgets
+        
+        cached = _disk_cache_get('og_' + _file_key(target))
+        if cached is not None:
+            self._cache['one_gadgets'] = cached
+            return cached
         
         try:
             self.log(f"运行 one_gadget {os.path.basename(target)} ...")
@@ -90,6 +136,7 @@ class GadgetFinder:
                         })
             
             self.log(f"找到 {len(gadgets)} 个one_gadget")
+            _disk_cache_put('og_' + _file_key(target), gadgets)
         except subprocess.TimeoutExpired:
             self.log("one_gadget超时")
         except FileNotFoundError:

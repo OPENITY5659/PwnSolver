@@ -185,6 +185,52 @@ def test_zz955_gated_by_binary_segments():
     compile(code, '<ret2syscall>', 'exec')
 
 
+def test_io_leak_detection_canary_and_pie():
+    """read+write 栈泄露模式检测: canary 题 (rbp帧) 与 scanf型全防护题 (调用者帧)"""
+    from analyzer import BinaryAnalyzer
+    a = BinaryAnalyzer(os.path.join(CHALLENGES, 'ret2libc_canary'), verbose=False)
+    f = a.find_interesting_functions()
+    il = f['io_leak']
+    assert il['io_leak'] is True
+    assert il['style'] == 'read_write'
+    assert il['dist_canary'] == 56 and il['dist_ret'] == 72
+    assert il['frame_mode'] == 'rbp'
+    assert il['anchor'] == 'call_vuln'
+
+    a2 = BinaryAnalyzer(os.path.join(CHALLENGES, 'ret2libc_allprot'), verbose=False)
+    f2 = a2.find_interesting_functions()
+    il2 = f2['io_leak']
+    assert il2['io_leak'] is True
+    assert il2['style'] == 'scanf_size_read'
+    assert il2['dist_ret'] == 88 and il2['dist_canary'] == 56
+    assert il2['frame_mode'] == 'rsp'
+    assert il2['anchor'] == 'main_ret'
+
+
+def test_hardened_template_syntax():
+    """Ret2LibcHardenedExploit 模板: 参数注入 + 生成代码可编译"""
+    from exploit_templates import Ret2LibcHardenedExploit
+    analysis = _mk_analysis()
+    analysis['functions']['io_leak'] = {
+        'io_leak': True, 'style': 'read_write', 'scanf_size': False,
+        'dist_canary': 56, 'dist_ret': 72, 'frame_mode': 'rbp',
+        'call_vuln_ret_off': 0x12b0, 'anchor': 'call_vuln',
+    }
+    gadgets = {
+        'specific': {'pop_rdi': None, 'libc_pop_rdi': 0x11bc7a, 'ret': 0x40101a,
+                     'libc_ret': 0x289fe, 'puts_plt': 0x401074, 'puts_got': 0x404000},
+        'pop_rdi_in_binary': False, 'plt': {'puts': 0x401074}, 'arch': 'amd64',
+    }
+    exp = Ret2LibcHardenedExploit(binary_path=os.path.join(CHALLENGES, 'ret2libc_canary'),
+                                  analysis=analysis, gadgets=gadgets,
+                                  libc_path=None, verbose=False)
+    code = exp.generate()
+    assert 'DIST_CANARY = 56' in code
+    assert 'DIST_RET = 72' in code
+    assert "ANCHOR = 'call_vuln'" in code
+    compile(code, '<hardened>', 'exec')
+
+
 if __name__ == '__main__':
     for fn in sorted(k for k in list(globals()) if k.startswith('test_')):
         print(f"--- {fn}")

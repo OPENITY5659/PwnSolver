@@ -18,6 +18,20 @@ class BinaryAnalyzer:
         self.elf = ELF(binary_path, checksec=False)
         self._info = None
         self._protections = None
+        self._disasm = None  # 反汇编缓存 (避免重复 objdump)
+
+    def _get_disasm(self):
+        """获取反汇编输出 (缓存, 全程只跑一次 objdump)"""
+        if self._disasm is None:
+            try:
+                result = subprocess.run(
+                    ['objdump', '-d', '-M', 'intel', self.binary_path],
+                    capture_output=True, text=True, timeout=30
+                )
+                self._disasm = result.stdout
+            except Exception:
+                self._disasm = ""
+        return self._disasm
         
     def log(self, msg):
         if self.verbose:
@@ -140,11 +154,7 @@ class BinaryAnalyzer:
         
         # === 4. 反汇编分析（找call system@plt的代码） ===
         try:
-            result = subprocess.run(
-                ['objdump', '-d', '-M', 'intel', self.binary_path],
-                capture_output=True, text=True, timeout=30
-            )
-            disasm = result.stdout
+            disasm = self._get_disasm()
             
             # 找 "call.*system@plt" 模式
             import re
@@ -188,6 +198,9 @@ class BinaryAnalyzer:
             # === 新增: 全局变量与立即数比较 (fmtstr 写目标: if (secret==X) win()) ===
             self._global_compare = self._detect_global_compare(disasm)
             
+            # === 新增: read+write 栈泄露模式 (canary/PIE 绕过) ===
+            self._io_leak = self._detect_io_leak(disasm)
+            
         except Exception:
             pass
         
@@ -210,6 +223,7 @@ class BinaryAnalyzer:
             'input_stages': self._detect_input_stages(),
             'fmt_string': getattr(self, '_fmt_string', {}),
             'global_compare': getattr(self, '_global_compare', []),
+            'io_leak': getattr(self, '_io_leak', {}),
         }
 
     def _find_func_entry(self, disasm, addr):
@@ -329,18 +343,157 @@ class BinaryAnalyzer:
                 seen.add(k)
                 uniq.append(c)
         return uniq
+
+    def _detect_io_leak(self, disasm):
+        """检测 read+write 栈泄露模式 (hardened ret2libc: canary/PIE 绕过)
+
+        特征 (同一函数内):
+          read(0, buf, size) → write(1, buf, 固定长度 > 帧大小)
+        或 scanf(size) + read(0, buf, size) + write (FORTIFY 绕过型)
+        返回: {'io_leak', 'style': 'read_write'|'scanf_size_read', 'func',
+               'read_size', 'scanf_size', 'call_vuln_ret_off',
+               'dist_canary': buf→canary 距离, 'dist_ret': buf→ret 距离}
+        支持 rbp 帧 (-O0) 与 rsp 帧 (-O2) 两种布局。
+        """
+        info = {'io_leak': False, 'style': None, 'func': None,
+                'read_size': 0, 'scanf_size': False, 'call_vuln_ret_off': None,
+                'dist_canary': None, 'dist_ret': None, 'frame_mode': None,
+                'anchor': 'call_vuln'}
+        func_re = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        cur = None
+        block = []
+        blocks = {}
+        for line in disasm.split('\n'):
+            m = func_re.match(line)
+            if m:
+                if cur and block:
+                    blocks[cur] = block
+                cur = m.group(2)
+                block = []
+            elif cur is not None:
+                block.append(line)
+        if cur and block:
+            blocks[cur] = block
+
+        vuln_func = None
+        for fname, lines in blocks.items():
+            text = '\n'.join(lines)
+            has_read = bool(re.search(r'call\s+.*<(?:read|__read_chk|_IO_getc)@plt>', text))
+            has_scanf = bool(re.search(r'call\s+.*<__isoc(?:99|23)_scanf@plt>', text))
+            has_write = bool(re.search(r'(?:call|jmp)\s+.*<write@plt>', text))
+            if not ((has_read or has_scanf) and has_write):
+                continue
+            # write 第三个参数 (edx) 是固定立即数 (泄露栈)
+            m = re.search(r'mov\s+edx,\s*(0x[0-9a-fA-F]+)', text)
+            if not m:
+                continue
+            write_size = int(m.group(1), 16)
+            if write_size < 0x50:
+                continue
+            vuln_func = fname
+            info['func'] = fname
+            info['read_size'] = write_size
+            info['scanf_size'] = has_scanf
+            info['style'] = 'scanf_size_read' if has_scanf else 'read_write'
+            info['io_leak'] = True
+
+            # 布局: 先在本块内分析; 找不到再转调用者块 (buf 在调用者帧的场景)
+            frame_extra, buf_rel, mode, canary_off = self._analyze_frame(lines)
+            if mode is None:
+                for cname, clines in blocks.items():
+                    for i, ln in enumerate(clines):
+                        if re.search(r'call\s+[0-9a-f]+\s+<' + re.escape(vuln_func) + r'>', ln):
+                            window = clines[max(0, i - 6):i + 1]
+                            w_extra, w_buf, w_mode, w_can = self._analyze_frame(window)
+                            wtext = '\n'.join(window)
+                            if w_mode == 'rbp' and not re.search(r'sub\s+rsp|push\s+r', wtext):
+                                # 窗口内无帧分配证据 → 用整个调用者块分析
+                                w_extra, w_buf, w_mode, w_can = self._analyze_frame(clines)
+                            if w_mode is not None:
+                                # 帧大小与 canary 用整个调用者块的数据
+                                frame_extra, _, _, canary_off = self._analyze_frame(clines)
+                                buf_rel, mode = w_buf, w_mode
+                                if w_can is not None:
+                                    canary_off = w_can
+                                # buf 在调用者帧 → leak 的 ret 是调用者的返回地址 (libc)
+                                info['anchor'] = 'main_ret'
+                            break
+                    if mode is not None:
+                        break
+
+            if mode == 'rbp' and buf_rel is not None:
+                info['dist_ret'] = buf_rel + 8
+                info['dist_canary'] = buf_rel + canary_off if canary_off is not None else buf_rel - 8
+                info['frame_mode'] = 'rbp'
+            elif mode == 'rsp' and buf_rel is not None:
+                info['dist_ret'] = frame_extra - buf_rel
+                if canary_off is not None:
+                    info['dist_canary'] = canary_off - buf_rel
+                else:
+                    info['dist_canary'] = frame_extra - 8 - buf_rel
+                info['frame_mode'] = 'rsp'
+            break
+
+        # 找调用该函数的循环位置 (call vuln 的下一条指令偏移 = pie base 定位锚点)
+        if vuln_func:
+            call_pat = re.compile(r'call\s+[0-9a-f]+\s+<' + re.escape(vuln_func) + r'>')
+            lines = disasm.split('\n')
+            for i, line in enumerate(lines):
+                if call_pat.search(line):
+                    m = re.match(r'^\s*([0-9a-f]+):', line)
+                    if m and i + 1 < len(lines):
+                        nm = re.match(r'^\s*([0-9a-f]+):', lines[i + 1])
+                        if nm:
+                            info['call_vuln_ret_off'] = int(nm.group(1), 16)
+                        break
+        return info
+
+    def _analyze_frame(self, lines):
+        """在指令行列表内分析栈帧: (frame_extra, buf_rel, mode, canary_off)"""
+        text = '\n'.join(lines)
+        pushes = len(re.findall(r'\spush\s+r', text))
+        subs = [int(x, 16) for x in re.findall(r'sub\s+rsp,\s*(0x[0-9a-fA-F]+)', text)]
+        frame_extra = pushes * 8 + (max(subs) if subs else 0)
+
+        buf_rel = None
+        mode = None
+        # 取最后一个匹配 (call 前最近的 buf 设置)
+        ms = list(re.finditer(r'lea\s+(?:rax|rsi|rdx|rdi),\s*\[rbp-?(0x[0-9a-fA-F]+)\]', text))
+        if ms:
+            buf_rel = int(ms[-1].group(1), 16)
+            mode = 'rbp'
+        if mode is None:
+            ms = list(re.finditer(r'lea\s+(?:rax|rsi|rdx|rdi),\s*\[rsp\+?(0x[0-9a-fA-F]+)\]', text))
+            if ms:
+                buf_rel = int(ms[-1].group(1), 16)
+                mode = 'rsp'
+        if mode is None and re.search(r'mov\s+(?:rsi|rdi),\s*rbp', text):
+            if re.search(r'mov\s+rbp,\s*rsp', text):
+                buf_rel = 0
+                mode = 'rsp'   # rbp 复用为帧内指针
+            else:
+                buf_rel = 0
+                mode = 'rbp'   # buf = rbp 本身 (真帧指针且缓冲在帧顶)
+        if mode is None and re.search(r'mov\s+(?:rsi|rdi),\s*rsp', text):
+            buf_rel = 0
+            mode = 'rsp'
+
+        canary_off = None
+        lines2 = text.split('\n')
+        for i, ln in enumerate(lines2):
+            if 'fs:0x28' in ln and '[' not in ln:
+                for w in lines2[max(0, i - 1):i + 3]:
+                    cm = re.search(r'\[(?:rsp|rbp)([+-])0x([0-9a-fA-F]+)\]', w)
+                    if cm:
+                        canary_off = (1 if cm.group(1) == '+' else -1) * int(cm.group(2), 16)
+                        break
+                if canary_off is not None:
+                    break
+        return frame_extra, buf_rel, mode, canary_off
     
     def _detect_input_stages(self):
         """检测多阶段输入模式(如s.s.a.l: read→scanf→read)。"""
-        try:
-            result = subprocess.run(
-                ['objdump', '-d', '-M', 'intel', self.binary_path],
-                capture_output=True, text=True, timeout=15
-            )
-            disasm = result.stdout
-        except:
-            return []
-        
+        disasm = self._get_disasm()
         stages = []
         current_func = None
         read_size = 0
@@ -591,11 +744,7 @@ class BinaryAnalyzer:
         buffers = []
         
         try:
-            result = subprocess.run(
-                ['objdump', '-d', '-M', 'intel', self.binary_path],
-                capture_output=True, text=True, timeout=30
-            )
-            disasm = result.stdout
+            disasm = self._get_disasm()
             
             # 搜索函数开头的栈分配
             for line in disasm.split('\n'):
