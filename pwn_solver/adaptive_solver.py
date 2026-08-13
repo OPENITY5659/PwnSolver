@@ -201,6 +201,10 @@ class AdaptiveSolver:
                 'libc_path': self.solver.libc_path,
             })
         
+        # 4b. format_string (检测到 printf 栈缓冲漏洞)
+        if funcs.get('fmt_string', {}).get('fmt_string'):
+            methods.append({'name': 'format_string', 'priority': 84})
+        
         # 5. ret2syscall
         if specific.get('syscall') and specific.get('pop_rax') and specific.get('pop_rdi'):
             methods.append({'name': 'ret2syscall', 'priority': 80})

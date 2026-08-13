@@ -154,7 +154,10 @@ class BinaryAnalyzer:
                     addr_match = re.search(r'^\s*([0-9a-f]+):', 
                                           disasm[:match.start()].split('\n')[-1])
                     if addr_match:
-                        implied_win.append((f'calls_{target}', f'0x{addr_match.group(1)}'))
+                        call_addr = int(addr_match.group(1), 16)
+                        # 回溯到所在函数入口 (stripped下直接跳函数入口更稳)
+                        entry = self._find_func_entry(disasm, call_addr)
+                        implied_win.append((f'calls_{target}', hex(entry if entry else call_addr)))
                         break
             
             # 统计危险调用
@@ -179,6 +182,12 @@ class BinaryAnalyzer:
             # === 新增: 栈提升/栈迁移检测 ===
             self._stack_pivot = self._detect_stack_pivot(disasm)
             
+            # === 新增: 格式字符串漏洞检测 (printf(buf) 非字符串字面量) ===
+            self._fmt_string = self._detect_format_string(disasm)
+            
+            # === 新增: 全局变量与立即数比较 (fmtstr 写目标: if (secret==X) win()) ===
+            self._global_compare = self._detect_global_compare(disasm)
+            
         except Exception:
             pass
         
@@ -199,7 +208,127 @@ class BinaryAnalyzer:
             'stack_pivot': getattr(self, '_stack_pivot', {}),
             'inner_overflows': getattr(self, '_inner_overflows', []),
             'input_stages': self._detect_input_stages(),
+            'fmt_string': getattr(self, '_fmt_string', {}),
+            'global_compare': getattr(self, '_global_compare', []),
         }
+
+    def _find_func_entry(self, disasm, addr):
+        """在反汇编输出中回溯 addr 所在函数的入口地址 (stripped 也可用)"""
+        func_re = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        last_entry = None
+        for line in disasm.split('\n'):
+            m = func_re.match(line)
+            if m:
+                entry = int(m.group(1), 16)
+                if entry > addr:
+                    break
+                last_entry = entry
+        return last_entry
+
+    def _detect_format_string(self, disasm):
+        """检测格式化字符串漏洞: printf(buf) — 格式参数来自栈缓冲区而非 rodata 字面量
+
+        特征 (按函数切分):
+          lea rax,[rbp-0xN] ... mov rdi,rax ... call printf@plt   ← 漏洞
+          mov rdi,[rbp-0xN] ... call printf@plt                    ← 漏洞
+          lea rdi,[rip+...] ... call printf@plt                    ← 安全
+        """
+        info = {'fmt_string': False, 'funcs': [], 'stack_buf': False, 'rodata_fmt': False}
+        func_re = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        cur = None
+        blocks = {}
+        block = []
+        for line in disasm.split('\n'):
+            m = func_re.match(line)
+            if m:
+                if cur and block:
+                    blocks[cur] = block
+                cur = m.group(2)
+                block = []
+            elif cur is not None:
+                block.append(line)
+        if cur and block:
+            blocks[cur] = block
+
+        for fname, lines in blocks.items():
+            # 找 printf 调用位置, 向前回溯 3 行内是否有 lea rax,[rbp-..]→mov rdi,rax 模式
+            vuln = False
+            for i, line in enumerate(lines):
+                if not re.search(r'call\s+.*<(?:printf|sprintf|vsnprintf|fprintf|snprintf)@plt>', line):
+                    continue
+                window = '\n'.join(lines[max(0, i - 4):i])
+                if re.search(r'mov\s+rdi,\s*rax', window) and \
+                   re.search(r'lea\s+rax,\s*\[rbp-0x[0-9a-f]+\]', window):
+                    vuln = True
+                    break
+                if re.search(r'(?:mov|lea)\s+rdi,\s*\[rbp-0x[0-9a-f]+\]', window):
+                    vuln = True
+                    break
+            if vuln:
+                info['funcs'].append(fname)
+                info['stack_buf'] = True
+
+        info['fmt_string'] = bool(info['funcs'])
+        return info
+
+    def _detect_global_compare(self, disasm):
+        """检测全局变量与立即数比较 (fmtstr 写目标)
+
+        模式 (同一函数内):
+          mov eax,DWORD PTR [rip+X]    # 40xxxx <secret>
+          cmp eax,0xdeadbeef
+        用于 FormatStringExploit 自动选择写目标。
+        返回: [{'addr': 绝对地址, 'value': 立即数, 'func': 函数名}]
+        """
+        compares = []
+        func_re = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        cur = None
+        block = []
+        blocks = {}
+        for line in disasm.split('\n'):
+            m = func_re.match(line)
+            if m:
+                if cur and block:
+                    blocks[cur] = block
+                cur = m.group(2)
+                block = []
+            elif cur is not None:
+                block.append(line)
+        if cur and block:
+            blocks[cur] = block
+
+        # 在函数块内: mov eax,DWORD PTR [rip+X] 后(若干指令内)出现 cmp eax, imm32
+        for fname, lines in blocks.items():
+            for i, line in enumerate(lines):
+                m = re.search(r'mov\s+eax,\s*DWORD PTR \[rip[+-]0x([0-9a-f]+)\](?:\s+#\s*([0-9a-f]+)\s*<([^>]*)>)?', line)
+                if not m:
+                    continue
+                # 注释中的绝对地址优先 (非PIE 用); 否则记录 rip 偏移
+                abs_addr = int(m.group(2), 16) if m.group(2) else None
+                rip_off = int(m.group(1), 16)
+                # 向后找 cmp eax, imm
+                for j in range(i + 1, min(i + 8, len(lines))):
+                    cm = re.search(r'cmp\s+eax,\s*(0x[0-9a-fA-F]+)', lines[j])
+                    if cm:
+                        compares.append({
+                            'addr': abs_addr,
+                            'rip_off': rip_off,
+                            'value': int(cm.group(1), 16),
+                            'func': fname,
+                        })
+                        break
+                if compares and compares[-1].get('func') == fname and abs_addr:
+                    # 每函数只取第一个匹配
+                    break
+        # 去重: 按 (addr, value)
+        seen = set()
+        uniq = []
+        for c in compares:
+            k = (c.get('addr'), c.get('value'))
+            if k not in seen:
+                seen.add(k)
+                uniq.append(c)
+        return uniq
     
     def _detect_input_stages(self):
         """检测多阶段输入模式(如s.s.a.l: read→scanf→read)。"""
@@ -250,16 +379,21 @@ class BinaryAnalyzer:
           - call free@plt   (Delete, 且不置NULL -> UAF)
           - call scanf@plt  (菜单选项输入)
           - bss数组索引存取: lea rax,[rip+X]; mov [rax+idx*8], r (chunk指针数组)
+        也支持 fgets+atoi 菜单 (heap_uaf 风格):
+          - fgets(input); choice = atoi(input); switch(choice)
         """
         import re
         info = {'heap_menu': False, 'free_count': 0, 'calloc_count': 0,
-                'scanf_count': 0, 'ptr_array': None, 'size_array': None,
-                'menu_options': None}
+                'scanf_count': 0, 'fgets_count': 0, 'atoi_found': False,
+                'ptr_array': None, 'size_array': None,
+                'menu_options': None, 'input_style': None}
         
         has_free = '<free@plt>' in disasm
         has_calloc = '<calloc@plt>' in disasm or '<malloc@plt>' in disasm
-        has_scarf = '<__isoc99_scanf@plt>' in disasm
-        if not (has_free and has_calloc and has_scarf):
+        has_scanf = '<__isoc99_scanf@plt>' in disasm
+        has_fgets = '<fgets@plt>' in disasm
+        has_atoi = '<atoi@plt>' in disasm or '<strtol@plt>' in disasm
+        if not (has_free and has_calloc and (has_scanf or (has_fgets and has_atoi))):
             return info
         
         # 统计调用次数 (菜单题通常每个功能调用一次)
@@ -267,6 +401,9 @@ class BinaryAnalyzer:
         info['calloc_count'] = len(re.findall(r'call\s+.*<calloc@plt>', disasm)) + \
                                len(re.findall(r'call\s+.*<malloc@plt>', disasm))
         info['scanf_count'] = len(re.findall(r'call\s+.*<__isoc99_scanf@plt>', disasm))
+        info['fgets_count'] = len(re.findall(r'call\s+.*<fgets@plt>', disasm))
+        info['atoi_found'] = has_atoi
+        info['input_style'] = 'scanf' if has_scanf else 'fgets_atoi'
         
         # bss数组检测: lea rax,[rip+X] 后跟 mov [rax+idx*8], r (存指针) 
         # 或 mov eax,[rax+idx*4] (存size)
@@ -278,9 +415,10 @@ class BinaryAnalyzer:
         for m in re.finditer(r'lea\s+rax,\[rip\+([0-9a-f]+)\][^\n]*\n(?:[^\n]*\n){0,3}[^\n]*\*8[^\n]*', disasm):
             ptr_arrays.add(m.group(1))
         
-        # 菜单判定: free+calloc都有 + (scanf次数>=3 或 指针数组存在)
+        # 菜单判定: free+calloc都有 + (scanf次数>=3 或 指针数组存在 或 fgets+atoi)
         if info['free_count'] >= 1 and info['calloc_count'] >= 1 and \
-           (info['scanf_count'] >= 3 or len(ptr_arrays) >= 1):
+           (info['scanf_count'] >= 3 or len(ptr_arrays) >= 1 or
+            (has_fgets and has_atoi)):
             info['heap_menu'] = True
             if ptr_arrays:
                 info['ptr_array'] = sorted(ptr_arrays)[0]

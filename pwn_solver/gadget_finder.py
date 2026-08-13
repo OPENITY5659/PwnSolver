@@ -101,7 +101,12 @@ class GadgetFinder:
         return gadgets
     
     def get_specific_gadgets(self):
-        """使用pwntools ROP获取特定常用gadgets（从binary和libc）"""
+        """使用pwntools ROP获取特定常用gadgets
+        
+        specific 只包含 **binary 自身** 的 gadget 地址(可直接 p64 使用);
+        libc 中的 gadget 以 `libc_` 前缀保存(相对偏移, 需加 libc 基址)。
+        另附 PLT/GOT 引用 (puts_plt, puts_got 等) 供模板判断输出能力。
+        """
         specific = {
             'pop_rdi': None,
             'pop_rsi': None,
@@ -109,8 +114,26 @@ class GadgetFinder:
             'pop_rax': None,
             'ret': None,
             'syscall': None,
+            # libc 相对偏移 (需 libc.address)
+            'libc_pop_rdi': None,
+            'libc_pop_rsi': None,
+            'libc_pop_rdx': None,
+            'libc_pop_rax': None,
+            'libc_ret': None,
+            'libc_syscall': None,
+            # PLT/GOT 引用
+            'puts_plt': None, 'write_plt': None, 'printf_plt': None,
+            'read_plt': None, 'gets_plt': None,
+            'puts_got': None, 'write_got': None, 'printf_got': None,
+            'read_got': None, 'gets_got': None,
         }
         
+        # PLT/GOT 引用 (直接可用, 不受架构影响)
+        for name in self.elf.plt:
+            specific[f'{name}_plt'] = self.elf.plt[name]
+        for name in self.elf.got:
+            specific[f'{name}_got'] = self.elf.got[name]
+
         try:
             # 使用pwntools ROP - 从binary
             # 注意: ROP(elf) 可能从linker找到gadgets — 验证地址在binary的LOAD段内
@@ -143,15 +166,14 @@ class GadgetFinder:
                 specific['pop_rax'] = rop.rax.address
             
             # 找ret gadget
-            for g in rop.gadgets:
-                insns = [i.strip() for i in str(g).split(';')]
-                if insns == ['ret'] and _in_binary(g.address):
+            for g in rop.gadgets.values():
+                if list(g.insns) == ['ret'] and _in_binary(g.address):
                     specific['ret'] = g.address
                     break
             
             # 找syscall (pwntools ROP only finds syscall;ret, also search raw disasm)
-            for g in rop.gadgets:
-                if 'syscall' in str(g).lower() and _in_binary(g.address):
+            for g in rop.gadgets.values():
+                if any('syscall' in i for i in g.insns) and _in_binary(g.address):
                     specific['syscall'] = g.address
                     break
             # Fallback: search disassembly for bare syscall
@@ -172,38 +194,46 @@ class GadgetFinder:
             self.log(f"Binary gadgets: pop_rdi={'OK' if specific['pop_rdi'] else 'NO'}, "
                      f"ret={'OK' if specific['ret'] else 'NO'}")
             
-            # 如果binary中没有，从libc中找
+            # 如果binary中没有，从libc中找 (存为相对偏移, 使用时需加基址)
             if self.libc:
                 try:
                     rop_libc = ROP(self.libc)
-                    if not specific['pop_rdi'] and rop_libc.rdi:
-                        specific['pop_rdi'] = rop_libc.rdi.address
-                        self.log(f"从libc找到pop_rdi: {hex(specific['pop_rdi'])}")
-                    if not specific['pop_rsi'] and rop_libc.rsi:
-                        specific['pop_rsi'] = rop_libc.rsi.address
-                    if not specific['pop_rax'] and rop_libc.rax:
-                        specific['pop_rax'] = rop_libc.rax.address
-                    if not specific['pop_rdx'] and rop_libc.rdx:
-                        specific['pop_rdx'] = rop_libc.rdx.address
-                        self.log(f"从libc找到pop_rdx: {hex(specific['pop_rdx'])}")
-                    if not specific['ret']:
-                        for g in rop_libc.gadgets:
-                            if str(g).strip() == 'ret':
-                                specific['ret'] = g.address
+                    if not specific['libc_pop_rdi'] and rop_libc.rdi:
+                        specific['libc_pop_rdi'] = rop_libc.rdi.address
+                    if not specific['libc_pop_rsi'] and rop_libc.rsi:
+                        specific['libc_pop_rsi'] = rop_libc.rsi.address
+                    if not specific['libc_pop_rax'] and rop_libc.rax:
+                        specific['libc_pop_rax'] = rop_libc.rax.address
+                    if not specific['libc_pop_rdx'] and rop_libc.rdx:
+                        specific['libc_pop_rdx'] = rop_libc.rdx.address
+                    if not specific['libc_ret']:
+                        for g in rop_libc.gadgets.values():
+                            if list(g.insns) == ['ret']:
+                                specific['libc_ret'] = g.address
                                 break
+                    if not specific['libc_syscall']:
+                        for g in rop_libc.gadgets.values():
+                            if any('syscall' in i for i in g.insns):
+                                specific['libc_syscall'] = g.address
+                                break
+                    self.log(f"libc gadgets: pop_rdi={hex(specific['libc_pop_rdi']) if specific['libc_pop_rdi'] else 'NO'} "
+                             f"ret={hex(specific['libc_ret']) if specific['libc_ret'] else 'NO'}")
                 except Exception as e:
                     self.log(f"libc ROP搜索错误: {e}")
         except Exception as e:
             self.log(f"pwntools ROP错误: {e}")
         
         # 最后的fallback: 从ROPgadget输出中搜索
-        if not specific['pop_rdi']:
+        # binary 来源 → specific[pop_*]; libc 来源 → specific[libc_pop_*] (相对偏移)
+        if not specific['pop_rdi'] or not specific['libc_pop_rdi']:
             for target_gadgets_key in ['rop_gadgets', 'libc_rop_gadgets']:
                 gadgets = self._cache.get(target_gadgets_key, [])
                 if not gadgets and target_gadgets_key == 'libc_rop_gadgets' and self.libc:
                     gadgets = self.find_rop_gadgets(self.libc_path)
                     self._cache['libc_rop_gadgets'] = gadgets
-                
+                if not gadgets:
+                    continue
+                is_libc = (target_gadgets_key == 'libc_rop_gadgets')
                 for g in gadgets:
                     if ':' not in g:
                         continue
@@ -213,20 +243,24 @@ class GadgetFinder:
                         addr = int(addr_str.strip(), 16)
                     except ValueError:
                         continue
-                    
-                    if not specific['pop_rdi'] and 'pop rdi' in insns and 'ret' in insns and 'call' not in insns:
-                        specific['pop_rdi'] = addr
-                    if not specific['pop_rsi'] and 'pop rsi' in insns and 'ret' in insns and 'call' not in insns:
-                        specific['pop_rsi'] = addr
-                    if not specific['pop_rdx'] and 'pop rdx' in insns and 'ret' in insns and 'call' not in insns:
-                        specific['pop_rdx'] = addr
-                    if not specific['ret'] and insns == 'ret':
-                        specific['ret'] = addr
-                    
-                    if all(specific.values()):
-                        break
-                if specific['pop_rdi']:
-                    break
+                    if is_libc:
+                        if not specific['libc_pop_rdi'] and 'pop rdi' in insns and 'ret' in insns and 'call' not in insns:
+                            specific['libc_pop_rdi'] = addr
+                        if not specific['libc_pop_rsi'] and 'pop rsi' in insns and 'ret' in insns and 'call' not in insns:
+                            specific['libc_pop_rsi'] = addr
+                        if not specific['libc_pop_rdx'] and 'pop rdx' in insns and 'ret' in insns and 'call' not in insns:
+                            specific['libc_pop_rdx'] = addr
+                        if not specific['libc_ret'] and insns == 'ret':
+                            specific['libc_ret'] = addr
+                    else:
+                        if not specific['pop_rdi'] and 'pop rdi' in insns and 'ret' in insns and 'call' not in insns:
+                            specific['pop_rdi'] = addr
+                        if not specific['pop_rsi'] and 'pop rsi' in insns and 'ret' in insns and 'call' not in insns:
+                            specific['pop_rsi'] = addr
+                        if not specific['pop_rdx'] and 'pop rdx' in insns and 'ret' in insns and 'call' not in insns:
+                            specific['pop_rdx'] = addr
+                        if not specific['ret'] and insns == 'ret':
+                            specific['ret'] = addr
         
         return specific
     

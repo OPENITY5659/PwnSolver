@@ -245,9 +245,10 @@ class PwnSolver:
                 self.log(f"  [+] 候选: ret2libc (置信度: 低) - 无pop_rdi!")
         
         # 4. format_string — 升级: 有win但无溢出→fmtstr写secret触发win
-        if 'printf' in str(funcs.get('dangerous', [])):
-            fmt_confidence = 60
-            fmt_reason = '存在printf调用'
+        fmt_info = funcs.get('fmt_string') or {}
+        if fmt_info.get('fmt_string'):
+            fmt_confidence = 75
+            fmt_reason = f"检测到printf(栈缓冲)格式串漏洞 {fmt_info.get('funcs', [])}"
             # 如果有win但溢出路径不明, format_string可能是正确路径
             if real_win and not has_real_overflow:
                 fmt_confidence = 85
@@ -445,8 +446,9 @@ class PwnSolver:
             # 检查多要素
             has_seccomp = self._check_seccomp(gadgets)
             has_heap = any(f in plt for f in ['malloc', 'free', 'calloc'])
-            has_overflow = bool([f for f in funcs.get('dangerous', []) 
-                               if 'gets' in str(f) or 'read' in str(f) or 'memcpy' in str(f)])
+            danger_names = {str(f[0]).split('.')[-1] for f in funcs.get('dangerous', [])}
+            unbounded = {'gets', 'read', 'scanf', 'strcpy', 'strcat', 'sprintf', 'memcpy', 'memmove'}
+            has_overflow = bool(unbounded & danger_names)
             has_array_overflow = (funcs.get('array_overflow') or {}).get('array_overflow', False)
             has_prng = (funcs.get('prng_info') or {}).get('prng_detected', False)
             has_stack_pivot = (funcs.get('stack_pivot') or {}).get('stack_pivot', False)
@@ -463,10 +465,14 @@ class PwnSolver:
                 self.log(f" ④ 组合: {', '.join(combo)}")
             
             # ====== Step 3: 简单方法优先 ======
-            self.log(f"\n ③ 尝试简单方法...")
+            heap_menu_active = bool((analysis.get('heap_menu') or funcs.get('heap_menu') or {}).get('heap_menu'))
+            if heap_menu_active:
+                self.log(f"\n ③ 堆菜单题 — 跳过栈类简单方法, 直接进入堆利用")
+            else:
+                self.log(f"\n ③ 尝试简单方法...")
             
             # 3a: ret2win — 最简单
-            if vuln_type[0] == 'ret2win' and vuln_type[1] >= 80:
+            if not heap_menu_active and vuln_type[0] == 'ret2win' and vuln_type[1] >= 80:
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
                     self._print_success("ret2win")
@@ -475,7 +481,7 @@ class PwnSolver:
             # 3a2: ret2syscall (binary有syscall+pop_rax+pop_rdi时优先，不需要libc)
             specific = gadgets.get('specific', {})
             has_syscall_gadgets = specific.get('syscall') and specific.get('pop_rax') and specific.get('pop_rdi')
-            if has_syscall_gadgets and has_overflow:
+            if not heap_menu_active and has_syscall_gadgets and has_overflow:
                 self.log("  尝试ret2syscall (binary内gadget, 无需libc)...")
                 self.vuln_type = ('ret2syscall', 88, 'binary有完整syscall链')
                 code = self.generate_exploit(analysis, gadgets)
@@ -484,7 +490,7 @@ class PwnSolver:
                     return True
             
             # 3b: one_gadget (无seccomp时)
-            if gadgets.get('one_gadgets') and not has_seccomp:
+            if not heap_menu_active and gadgets.get('one_gadgets') and not has_seccomp:
                 self.vuln_type = ('one_gadget', 95, '')
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
@@ -492,16 +498,16 @@ class PwnSolver:
                     return True
             
             # 3c: shellcode (NX禁用时)
-            if not protections.get('nx', True) and has_overflow:
+            if not heap_menu_active and not protections.get('nx', True) and has_overflow:
                 self.vuln_type = ('shellcode', 90, '')
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
                     self._print_success("shellcode")
                     return True
             
-            # 3d: format string
-            if 'printf' in plt:
-                self.vuln_type = ('format_string', 70, '')
+            # 3d: format string — 仅在检测到 printf(栈缓冲) 时
+            if not heap_menu_active and funcs.get('fmt_string', {}).get('fmt_string') and 'printf' in plt:
+                self.vuln_type = ('format_string', 75, '')
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
                     self._print_success("format_string")
@@ -517,9 +523,11 @@ class PwnSolver:
                     self._print_success("ORW (seccomp绕过)")
                     return True
             
-            # 4b: ret2libc (有libc+pop_rdi)
+            # 4b: ret2libc (有溢出即可 — 模板内支持 p.libs()/leak/libc gadget)
             pop_rdi_ok = gadgets.get('pop_rdi_in_binary', False)
-            if pop_rdi_ok and has_overflow and self.libc_path:
+            libc_ok = bool(self.libc_path) or not self.remote
+            if has_overflow and libc_ok:
+                self.log(f"  尝试ret2libc (pop_rdi={'binary' if pop_rdi_ok else 'libc/leak'})...")
                 self.vuln_type = ('ret2libc', 80, '')
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
