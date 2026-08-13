@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PwnSolver GUI v2 — 自动PWN解题器前端
-支持: WSL解题、自适应求解器、交互Shell、exp管理、代码审计
+支持: WSL/本机解题、自适应求解器、交互Shell、exp管理、代码审计
 """
 
 import subprocess, sys, os, threading, json, time, re, shlex, datetime
@@ -18,14 +18,53 @@ except ImportError:
     print("tkinter not found! Install: pip install tk")
     sys.exit(1)
 
-# ========= 路径工具 =========
+# ========= 路径与执行环境 =========
 def to_wsl_path(win_path):
-    """C:\\Users\\... → /mnt/c/Users/..."""
+    """C:\\Users\\... → /mnt/c/Users/... (Linux 路径原样返回)"""
     p = win_path.replace('\\', '/')
     if ':' in p:
         drive, rest = p.split(':', 1)
         p = f'/mnt/{drive.lower()}{rest}'
     return p
+
+IS_WINDOWS = sys.platform == 'win32'
+
+def exec_prefix():
+    """Windows 上经 wsl 执行; 在 WSL/Linux 内直接执行"""
+    return ['wsl', 'bash', '-c'] if IS_WINDOWS else ['bash', '-c']
+
+def open_path(path):
+    """跨平台打开文件/文件夹"""
+    if IS_WINDOWS:
+        os.startfile(path)
+    else:
+        subprocess.Popen(['xdg-open', path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def kill_process_tree(proc):
+    """杀掉进程树 (bash -c 包装下需连同子进程)"""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.kill()
+    except Exception:
+        pass
+
+def build_solve_cmd(workspace, binary, libc='', ld='', remote_host='',
+                    remote_port='', timeout=120, adaptive=True):
+    """构建 solver 命令 (纯函数, 便于测试)"""
+    args = ['python3', '-W', 'ignore', 'pwn_solver/solver.py', binary]
+    if libc:
+        args += ['-l', libc]
+    if ld:
+        args += ['-d', ld]
+    if remote_host and remote_port:
+        args += ['-r', remote_host, str(remote_port)]
+    args += ['-t', str(timeout)]
+    if not adaptive:
+        args += ['--no-adaptive']
+    return f"cd {shlex.quote(workspace)} && " + ' '.join(shlex.quote(a) for a in args)
 
 WORKSPACE = to_wsl_path(str(Path(__file__).parent))
 EXPLOITS_DIR = os.path.join(str(Path(__file__).parent), 'exploits')
@@ -84,6 +123,15 @@ class PwnSolverGUI:
         tk.Button(row1, text="浏览", command=self._browse_libc,
                 bg='#45475a', fg='#cdd6f4', relief='flat',
                 font=('Consolas', 8)).grid(row=0, column=5)
+        tk.Label(row1, text="📎 LD:", fg='#a6adc8', bg='#1e1e2e',
+                font=('Consolas', 9)).grid(row=0, column=6, sticky='w', padx=(20,0), pady=3)
+        self.ld_var = tk.StringVar()
+        tk.Entry(row1, textvariable=self.ld_var, width=20,
+                bg='#313244', fg='#cdd6f4', insertbackground='#cdd6f4',
+                font=('Consolas', 9)).grid(row=0, column=7, padx=5)
+        tk.Button(row1, text="浏览", command=self._browse_ld,
+                bg='#45475a', fg='#cdd6f4', relief='flat',
+                font=('Consolas', 8)).grid(row=0, column=8)
         
         # 行2: Remote Host + Port + Timeout + 选项
         row2 = tk.Frame(cfg_frame, bg='#1e1e2e')
@@ -110,12 +158,17 @@ class PwnSolverGUI:
                 bg='#313244', fg='#cdd6f4', insertbackground='#cdd6f4',
                 font=('Consolas', 9)).grid(row=0, column=5, padx=3, sticky='w')
         
-        # 自适应求解器选项
+        # 自适应求解器选项 + 成功自动Shell
         self.adaptive_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2, text="🔁 自适应", variable=self.adaptive_var,
                 bg='#1e1e2e', fg='#a6e3a1', selectcolor='#313244',
                 font=('Consolas', 9), activebackground='#1e1e2e',
                 activeforeground='#a6e3a1').grid(row=0, column=4, padx=(20,0))
+        self.auto_shell_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2, text="💻 成功后自动Shell", variable=self.auto_shell_var,
+                bg='#1e1e2e', fg='#cba6f7', selectcolor='#313244',
+                font=('Consolas', 9), activebackground='#1e1e2e',
+                activeforeground='#cba6f7').grid(row=0, column=5, padx=(10,0))
         
         # === 按钮区 ===
         btn_frame = tk.Frame(self.root, bg='#1e1e2e', pady=8)
@@ -198,6 +251,16 @@ class PwnSolverGUI:
                 selectbackground='#45475a', selectforeground='#cdd6f4')
         self.exp_listbox.pack(fill='both', expand=True, pady=(0,5))
         self.exp_listbox.bind('<Double-Button-1>', self._open_selected_exp)
+        # 右键菜单: 打开 / 复制路径 / 删除 / 刷新
+        self.exp_menu = tk.Menu(self.root, tearoff=0,
+                                bg='#313244', fg='#cdd6f4',
+                                activebackground='#45475a', activeforeground='#cdd6f4')
+        self.exp_menu.add_command(label="打开", command=self._open_selected_exp)
+        self.exp_menu.add_command(label="复制路径", command=self._copy_exp_path)
+        self.exp_menu.add_command(label="删除", command=self._delete_selected_exp)
+        self.exp_menu.add_separator()
+        self.exp_menu.add_command(label="刷新", command=self._refresh_exp_list)
+        self.exp_listbox.bind('<Button-3>', self._show_exp_menu)
         
         # Shell快速输入
         tk.Label(right, text="💻 快速Shell:", fg='#a6adc8', bg='#1e1e2e',
@@ -215,6 +278,12 @@ class PwnSolverGUI:
         
         paned.add(left, stretch='always')
         paned.add(right, stretch='never')
+        
+        # 底部状态栏
+        self.status_var = tk.StringVar(value="就绪")
+        tk.Label(self.root, textvariable=self.status_var, anchor='w',
+                bg='#2d2d44', fg='#a6adc8',
+                font=('Consolas', 8), padx=10, pady=2).pack(fill='x', side='bottom')
     
     # ========== 日志 ==========
     def log(self, msg, tag=None):
@@ -261,13 +330,18 @@ class PwnSolverGUI:
         f = filedialog.askopenfilename(title="选择libc文件")
         if f:
             self.libc_var.set(f)
+
+    def _browse_ld(self):
+        f = filedialog.askopenfilename(title="选择ld-linux加载器文件")
+        if f:
+            self.ld_var.set(f)
     
-    # ========== WSL执行 ==========
-    def _run_wsl_stream(self, cmd, timeout=60):
-        """流式运行WSL命令"""
+    # ========== 执行 ==========
+    def _run_stream(self, cmd, timeout=60):
+        """流式运行命令 (Windows 经 wsl, WSL 内直接执行)"""
         self._killed = False
         self._solve_proc = None
-        full_cmd = ['wsl', 'bash', '-c', cmd]
+        full_cmd = exec_prefix() + [cmd]
         try:
             proc = subprocess.Popen(full_cmd, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True,
@@ -301,7 +375,7 @@ class PwnSolverGUI:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             self._killed = True
-            proc.kill(); proc.wait()
+            kill_process_tree(proc)
             self.log("\n⏰ 超时!", 'error')
         
         t1.join(timeout=3); t2.join(timeout=3)
@@ -318,8 +392,9 @@ class PwnSolverGUI:
             messagebox.showerror("错误", "请先选择binary文件!")
             return
         
-        wsl_binary = shlex.quote(to_wsl_path(binary))
+        wsl_binary = to_wsl_path(binary)
         libc = self.libc_var.get().strip()
+        ld = self.ld_var.get().strip() if hasattr(self, 'ld_var') else ''
         timeout = self.timeout_var.get().strip() or '120'
         remote_host = self.remote_host_var.get().strip()
         remote_port = self.remote_port_var.get().strip()
@@ -338,41 +413,53 @@ class PwnSolverGUI:
             messagebox.showerror("错误", "超时必须是数字!")
             return
         
-        libc_arg = f"-l {shlex.quote(to_wsl_path(libc))}" if libc else ""
-        remote_arg = ""
         if remote_host and remote_port:
             try:
                 port_int = int(remote_port)
                 if not (1 <= port_int <= 65535):
                     raise ValueError
-                remote_arg = f"-r {shlex.quote(remote_host)} {shlex.quote(remote_port)}"
             except ValueError:
                 messagebox.showerror("错误", "端口必须是 1-65535 的数字!")
                 return
         
-        cmd = (f"cd {WORKSPACE} && python3 -W ignore "
-               f"pwn_solver/solver.py {wsl_binary} {libc_arg} {remote_arg} "
-               f"-t {timeout_int}")
+        cmd = build_solve_cmd(
+            WORKSPACE, shlex.quote(wsl_binary),
+            libc=shlex.quote(to_wsl_path(libc)) if libc else '',
+            ld=shlex.quote(to_wsl_path(ld)) if ld else '',
+            remote_host=shlex.quote(remote_host) if remote_host else '',
+            remote_port=shlex.quote(remote_port) if remote_port else '',
+            timeout=timeout_int,
+            adaptive=self.adaptive_var.get(),
+        )
+        self.log(f"$ {cmd}", 'shell')
         
         self.solve_btn.config(state='disabled', text="⏳ 解题中...")
         self.shell_btn.config(state='disabled')
+        self.progress.start(12)
+        self.status_var.set("解题中...")
         
         def worker():
-            rc = self._run_wsl_stream(cmd, timeout=timeout_int + 120)
+            rc = self._run_stream(cmd, timeout=timeout_int + 120)
             self.root.after(0, lambda: self._on_solve_done(rc))
         
         threading.Thread(target=worker, daemon=True).start()
     
     def _on_solve_done(self, rc):
+        self.progress.stop()
         self.solve_btn.config(state='normal', text="🚀 开始解题")
         self._cleanup_cores()
         if rc == 0:
             self.log("\n✅ 解题成功! 点击 💻交互Shell 获取shell", 'success')
             self.shell_btn.config(state='normal', bg='#cba6f7')
+            self.status_var.set("解题成功")
+            if self.auto_shell_var.get():
+                self.root.after(200, self._open_interactive_shell)
         elif rc is not None:
             self.log(f"\n❌ 退出码: {rc}", 'error')
+            self.status_var.set(f"解题失败 (rc={rc})")
         else:
             self.log("\n⏰ 超时", 'error')
+            self.status_var.set("解题超时")
         self._refresh_exp_list()
     
     # ========== 代码审计 / 偏移 ==========
@@ -386,7 +473,7 @@ class PwnSolverGUI:
         cmd = (f"cd {WORKSPACE} && python3 -W ignore -c "
                f"\"from pwn_solver.code_auditor import audit_binary; "
                f"audit_binary({wsl_binary})\"")
-        threading.Thread(target=lambda: self._run_wsl_stream(cmd, 60), daemon=True).start()
+        threading.Thread(target=lambda: self._run_stream(cmd, 60), daemon=True).start()
     
     def _run_offset(self):
         binary = self.binary_var.get().strip()
@@ -398,32 +485,32 @@ class PwnSolverGUI:
         cmd = (f"cd {WORKSPACE} && python3 -W ignore -c "
                f"\"from pwn_solver.gdb_debugger import GdbDebugger; "
                f"g=GdbDebugger({wsl_binary}); print('offset:', g.find_offset())\"")
-        threading.Thread(target=lambda: self._run_wsl_stream(cmd, 30), daemon=True).start()
+        threading.Thread(target=lambda: self._run_stream(cmd, 30), daemon=True).start()
     
     # ========== 停止 ==========
     def _stop_solve(self):
         self._killed = True
+        self.progress.stop()
         if self._solve_proc:
-            try: self._solve_proc.kill()
-            except: pass
+            kill_process_tree(self._solve_proc)
             self._solve_proc = None
         if self._shell_proc:
-            try: self._shell_proc.kill()
-            except: pass
+            kill_process_tree(self._shell_proc)
             self._shell_proc = None
         self.solve_btn.config(state='normal', text="🚀 开始解题")
         self.shell_btn.config(state='normal', text="💻 交互Shell")
+        self.status_var.set("已停止")
         self._cleanup_cores()
         self.log("\n⏹ 已停止", 'warning')
     
     def _cleanup_cores(self):
-        """清理core dump文件 (通过WSL)"""
-        import subprocess as _sp
+        """清理core dump文件 (经执行前缀)"""
         try:
-            _sp.run(['wsl', 'bash', '-c',
-                f'rm -f core core.* cores/core.* 2>/dev/null; echo ok'],
+            subprocess.run(exec_prefix() +
+                ['rm -f core core.* cores/core.* 2>/dev/null; echo ok'],
                 capture_output=True, timeout=5)
-        except: pass
+        except Exception:
+            pass
     
     # ========== 交互Shell ==========
     def _open_interactive_shell(self):
@@ -462,7 +549,7 @@ class PwnSolverGUI:
         self._killed = False  # 重置
         
         # 使用Popen保持进程存活
-        full_cmd = ['wsl', 'bash', '-c', cmd]
+        full_cmd = exec_prefix() + [cmd]
         try:
             self._shell_proc = subprocess.Popen(
                 full_cmd,
@@ -473,6 +560,8 @@ class PwnSolverGUI:
             )
         except Exception as e:
             self.log(f"启动Shell失败: {e}", 'error')
+            self.shell_btn.config(state='normal', text="💻 交互Shell")
+            self.status_var.set("Shell启动失败")
             return
         
         # 读取stdout线程
@@ -511,9 +600,9 @@ class PwnSolverGUI:
     def _on_shell_exit(self):
         self.shell_btn.config(state='normal', text="💻 交互Shell")
         if self._shell_proc:
-            try: self._shell_proc.kill()
-            except: pass
+            kill_process_tree(self._shell_proc)
             self._shell_proc = None
+        self.status_var.set("就绪")
         self.log("\n💻 Shell已退出", 'warning')
     
     # ========== Exp管理 ==========
@@ -523,18 +612,15 @@ class PwnSolverGUI:
             return None
         binary = self.binary_var.get().strip()
         base = os.path.basename(binary) if binary else ""
-        # 优先匹配当前binary
         exps = sorted(
             [f for f in os.listdir(EXPLOITS_DIR) if f.endswith('.py')],
             key=lambda f: os.path.getmtime(os.path.join(EXPLOITS_DIR, f)),
             reverse=True
         )
-        # 先找匹配的
         matching = [f for f in exps if base and base in f]
         return os.path.join(EXPLOITS_DIR, matching[0]) if matching else (
             os.path.join(EXPLOITS_DIR, exps[0]) if exps else None
         )
-        return os.path.join(EXPLOITS_DIR, exps[0]) if exps else None
     
     def _refresh_exp_list(self):
         """刷新exp文件列表"""
@@ -550,16 +636,43 @@ class PwnSolverGUI:
             self.exp_listbox.insert(tk.END, exp)
     
     def _open_selected_exp(self, event=None):
-        """双击打开选中的exp"""
+        """双击/菜单打开选中的exp"""
         sel = self.exp_listbox.curselection()
         if sel:
             exp_name = self.exp_listbox.get(sel[0])
             exp_path = os.path.join(EXPLOITS_DIR, exp_name)
-            os.startfile(exp_path)
+            open_path(exp_path)
+    
+    def _show_exp_menu(self, event):
+        try:
+            self.exp_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.exp_menu.grab_release()
+    
+    def _copy_exp_path(self):
+        sel = self.exp_listbox.curselection()
+        if sel:
+            exp_path = os.path.join(EXPLOITS_DIR, self.exp_listbox.get(sel[0]))
+            self.root.clipboard_clear()
+            self.root.clipboard_append(exp_path)
+            self.log(f"已复制路径: {exp_path}", 'info')
+    
+    def _delete_selected_exp(self):
+        sel = self.exp_listbox.curselection()
+        if not sel:
+            return
+        exp_path = os.path.join(EXPLOITS_DIR, self.exp_listbox.get(sel[0]))
+        if messagebox.askyesno("删除", f"删除 {os.path.basename(exp_path)}?"):
+            try:
+                os.remove(exp_path)
+                self.log(f"已删除: {os.path.basename(exp_path)}", 'warning')
+            except Exception as e:
+                self.log(f"删除失败: {e}", 'error')
+            self._refresh_exp_list()
     
     def _open_exp_folder(self):
         """打开exp文件夹"""
-        os.startfile(EXPLOITS_DIR)
+        open_path(EXPLOITS_DIR)
     
     # ========== 主循环 ==========
     def run(self):

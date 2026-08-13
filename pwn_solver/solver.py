@@ -400,7 +400,7 @@ class PwnSolver:
                 self.log(f"  [-] 本地测试失败")
             return result
     
-    def solve(self, use_strategy=True):
+    def solve(self, use_strategy=True, use_adaptive=True):
         """主入口 — 完整决策链:
         ① libc? → ② 漏洞类型? → ③ 简单方法? → ④ 组合利用? → ⑤ 爆破? → ⑥ 诊断
         """
@@ -644,23 +644,24 @@ class PwnSolver:
                     return True
             
             # ====== Step 6: 自适应求解器 (反馈闭环) ======
-            self.log(f"\n ⑥ 爆破失败 → 启动自适应求解器 (反馈闭环)")
-            try:
-                from adaptive_solver import AdaptiveSolver, AdaptiveConfig
-                config = AdaptiveConfig(
-                    max_total_attempts=50,
-                    max_attempts_per_method=12,
-                    verbose=self.verbose,
-                )
-                adaptive = AdaptiveSolver(self, config)
-                if adaptive.solve(analysis, gadgets):
-                    self._print_success("自适应求解器")
-                    return True
-                self.log("  自适应求解器未成功")
-            except ImportError as e:
-                self.log(f"  自适应求解器不可用: {e}")
-            except Exception as e:
-                self.log(f"  自适应求解器异常: {e}")
+            if use_adaptive:
+                self.log(f"\n ⑥ 爆破失败 → 启动自适应求解器 (反馈闭环)")
+                try:
+                    from adaptive_solver import AdaptiveSolver, AdaptiveConfig
+                    config = AdaptiveConfig(
+                        max_total_attempts=50,
+                        max_attempts_per_method=12,
+                        verbose=self.verbose,
+                    )
+                    adaptive = AdaptiveSolver(self, config)
+                    if adaptive.solve(analysis, gadgets):
+                        self._print_success("自适应求解器")
+                        return True
+                    self.log("  自适应求解器未成功")
+                except ImportError as e:
+                    self.log(f"  自适应求解器不可用: {e}")
+                except Exception as e:
+                    self.log(f"  自适应求解器异常: {e}")
             
             # ====== Step 7: 诊断 ======
             self._print_failure(analysis, gadgets, vuln_type)
@@ -807,6 +808,8 @@ def main():
                         help='解题成功后进入交互shell')
     parser.add_argument('--shell-only', action='store_true',
                         help='仅运行最新exp并进入交互shell(不重新解题)')
+    parser.add_argument('--no-adaptive', action='store_true',
+                        help='禁用自适应求解器 (solve --no-adaptive)')
     
     args = parser.parse_args()
     
@@ -827,7 +830,8 @@ def main():
     # 注入超时配置
     solver._test_timeout = args.timeout
     
-    success = solver.solve()
+    success = solver.solve(use_strategy=not args.no_adaptive,
+                           use_adaptive=not args.no_adaptive)
     
     if args.output:
         solver.save_exploit_script(args.output)
