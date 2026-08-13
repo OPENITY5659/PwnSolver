@@ -24,6 +24,53 @@ TAG_CRYPTO = 'crypto'
 DANGER_SYMS = {'gets', 'read', 'scanf', '__isoc99_scanf', '__isoc23_scanf',
                'strcpy', 'strcat', 'sprintf', 'memcpy', 'memmove'}
 
+# 标准 C 库/libc 函数名 — 静态链接 (musl/glibc) 下无 @plt 后缀, 按名过滤不展开
+LIBC_SYMS = {
+    # stdio
+    'setvbuf', 'setbuf', 'printf', 'puts', 'putchar', 'fopen', 'fclose',
+    'fwrite', 'fread', 'fgets', 'fputs', 'fputc', 'fgetc', 'getchar',
+    'fflush', 'feof', 'ferror', 'fseek', 'ftell', 'rewind', 'fprintf',
+    'sprintf', 'snprintf', 'scanf', 'fscanf', 'vprintf', 'vfprintf',
+    'perror', 'ungetc', 'fgets_unlocked', 'clearerr', 'fileno', 'fdopen',
+    'tmpfile', 'remove', 'rename',
+    # string/memory
+    'memset', 'memcpy', 'memmove', 'memcmp', 'memchr', 'strlen', 'strcpy',
+    'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp', 'strchr',
+    'strrchr', 'strstr', 'strtok', 'strdup', 'strndup', 'strspn',
+    'strcspn', 'strpbrk', 'strerror', 'strcoll', 'strxfrm',
+    # stdlib
+    'malloc', 'calloc', 'realloc', 'free', 'exit', 'abort', 'atexit',
+    'atoi', 'atol', 'atoll', 'strtol', 'strtoul', 'strtod', 'abs', 'labs',
+    'rand', 'srand', 'qsort', 'bsearch', 'getenv', 'setenv', 'putenv',
+    'system', 'getpid', 'sleep', 'usleep', 'alarm', 'signal',
+    # ctype/math/io
+    'isalpha', 'isdigit', 'isalnum', 'isspace', 'islower', 'isupper',
+    'tolower', 'toupper', 'isprint', 'iscntrl',
+    'pow', 'sqrt', 'sin', 'cos', 'tan', 'fabs', 'floor', 'ceil', 'log',
+    'exp', 'atan2', 'fmod',
+    # 系统
+    'open', 'close', 'read', 'write', 'lseek', 'stat', 'fstat', 'lstat',
+    'access', 'unlink', 'mkdir', 'rmdir', 'chdir', 'getcwd', 'chmod',
+    'fcntl', 'dup', 'dup2', 'pipe', 'socket', 'connect', 'bind', 'listen',
+    'accept', 'send', 'recv', 'execve', 'execv', 'execl', 'fork', 'wait',
+    'waitpid', 'kill', 'mmap', 'munmap', 'mprotect', 'ioctl', 'gettimeofday',
+    'clock', 'time', 'nanosleep', 'syscall', 'prctl', 'ptrace', 'select',
+    'poll', 'epoll_create', 'epoll_ctl', 'epoll_wait',
+    # 内部/musl 实现函数 (静态链接常见)
+    '__lockfile', '__unlockfile', '__uflow', '__fwritex', '__fdopen',
+    '__fmodeflags', '__syscall_cp', '__syscall_ret', '__errno_location',
+    '__strchrnul', '__ofl_lock', '__ofl_unlock', '__unlist_locked_file',
+    '__stack_chk_fail', '__libc_start_main', '__libc_csu_init',
+    '__libc_csu_fini', '__ctype_b_loc', '__toupper_loc', '__tolower_loc',
+    '__overflow', '__stdio_read', '__stdio_write', '__stdio_seek',
+    '__stdio_close', '__towrite', '__towrite_needs_stdio_exit',
+    '__fopen_rb_ca', '__restore_rt', '__restore', '_exit', '_start',
+    '__init_libc', '__init_tls', '__init_ssp', 'dummy1', '__dls2',
+    '__dls2b', '__dls3', '__libc_exit_fini', '__funcs_on_exit',
+    '__stdio_exit', '__stdio_exit_needed', '__init_security',
+    '__libc_start_init', '__libc_start_main_stage2',
+}
+
 # ========= 经典加解密算法静态识别 =========
 B64_TABLE = b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 B64_TABLE_URL = b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
@@ -59,17 +106,22 @@ def detect_crypto(disasm, elf):
     if HEX_TABLE in data and b'%02x' in data.lower():
         found.append({'type': 'hex', 'desc': 'Hex 编码 ("%02x")',
                       'evidence': '"%02x" 格式串'})
-    # 3. XOR 加密 (XOR 非零立即数; 排除 xor reg,reg 清零)
+    # 3. XOR 加密 (XOR 非零单字节立即数; 排除 xor reg,reg 清零与静态库噪声)
     keys = set()
     for m in re.finditer(r'xor\s+(?:byte\s+)?ptr\s+\[[^\]]+\],\s*(0x[0-9a-f]+)', disasm, re.I):
-        keys.add(int(m.group(1), 16) & 0xff)
+        k = int(m.group(1), 16)
+        if 0 < k <= 0xff:
+            keys.add(k)
     for m in re.finditer(r'xor\s+(?:al|bl|cl|dl),\s*(0x[0-9a-f]+)', disasm, re.I):
-        keys.add(int(m.group(1), 16) & 0xff)
+        k = int(m.group(1), 16)
+        if 0 < k <= 0xff:
+            keys.add(k)
     for m in re.finditer(r'xor\s+(?:e?ax|e?bx|e?cx|e?dx|esi|edi),\s*(0x[0-9a-f]+)', disasm, re.I):
         k = int(m.group(1), 16)
-        if k:
-            keys.add(k & 0xff if k <= 0xff else k)
-    if keys:
+        if 0 < k <= 0xff:
+            keys.add(k)
+    # 静态库中会出现大量互不相关的 xor 立即数 — 不同 key 超过 3 个视为噪声
+    if keys and len(keys) <= 3:
         found.append({'type': 'xor', 'desc': 'XOR 加密',
                       'evidence': 'key=' + ', '.join(hex(k) for k in sorted(keys))})
     # 4. ROT13 (字母范围比较 + ±0xd)
@@ -94,6 +146,19 @@ def detect_crypto(disasm, elf):
         found.append({'type': 'tea', 'desc': 'TEA/XTEA 分组加密',
                       'evidence': 'delta 0x9e3779b9'})
     return found
+
+
+def _reg_display(reg):
+    """寄存器 → 伪 C 显示名 (避免直接冒出 eax 这种奇怪名字)"""
+    return {
+        'rax': 'retval', 'eax': 'retval', 'al': 'retval',
+        'rbx': 'x1', 'ebx': 'x1',
+        'rcx': 'x2', 'ecx': 'x2',
+        'rdx': 'x3', 'edx': 'x3',
+        'rsi': 'x4', 'esi': 'x4',
+        'rdi': 'x5', 'edi': 'x5',
+        'r8': 'x6', 'r9': 'x7',
+    }.get(reg, reg)
 
 
 def parse_objdump(binary_path):
@@ -156,7 +221,9 @@ def decompile(binary_path, elf_strings=None):
 
     # 从 main 出发收集调用链内的用户函数
     def is_user_func(name):
-        return name in funcs and '@plt' not in name and not name.startswith('_')
+        return (name in funcs and '@plt' not in name
+                and not name.startswith('_')
+                and name not in LIBC_SYMS)
 
     visited = set()
     queue = ['main'] if 'main' in funcs else list(funcs)[:1]
@@ -287,6 +354,19 @@ def decompile(binary_path, elf_strings=None):
                 vname = 'buf' if off == max_off else f'var_{off:x}'
                 regs[m.group(1).lstrip('e')] = vname
                 continue
+            # 4b) lea rax,[rsp+X] → 栈变量 (musl 风格, rbp 帧外)
+            m = re.match(r'lea\s+([a-z0-9]+),\s*\[rsp\+0x([0-9a-f]+)\]', insn_body)
+            if m:
+                off = int(m.group(2), 16)
+                regs[m.group(1).lstrip('e')] = f'var_{off:x}'
+                continue
+            # 4c) mov reg, [rsp+X] / [rbp-X] → 读栈变量
+            m = re.match(r'mov\s+([a-z0-9]+),\s*[a-z0-9]*\s*(?:QWORD|DWORD|BYTE)?\s*PTR\s*\[r(?:sp|bp)[+-]0x([0-9a-f]+)\]', insn_body)
+            if m:
+                off = int(m.group(2), 16)
+                vname = 'buf' if off == max_off else f'var_{off:x}'
+                regs[m.group(1).lstrip('e')] = vname
+                continue
             # 5) call
             m = re.search(r'call\s+[0-9a-f]+\s*<([^>]+)>', insn_body)
             if m:
@@ -327,10 +407,10 @@ def decompile(binary_path, elf_strings=None):
                 if fn and is_user_func(fn):
                     emit(f'{indent()}{fn}();')
                 continue
-            # 6) cmp + 条件跳转 → if 结构
+            # 6) cmp + 条件跳转 → if 结构 (寄存器显示名映射, 如 eax→retval)
             m = re.match(r'cmp\s+(\w+),\s*(0x[0-9a-f]+)', insn_body)
             if m:
-                pending_cond = (m.group(1), m.group(2))
+                pending_cond = (_reg_display(m.group(1)), m.group(2))
                 continue
             m = re.match(r'j(?:e|ne|le|ge|a|b)\s+([0-9a-f]+)', insn_body)
             if m and pending_cond:
