@@ -468,11 +468,11 @@ class PwnSolverGUI:
         if not binary:
             messagebox.showerror("错误", "请先选择binary文件!")
             return
-        wsl_binary = shlex.quote(to_wsl_path(binary))
         self.log(f"\n📋 代码审计: {os.path.basename(binary)}", 'bold')
+        code = (f"from pwn_solver.code_auditor import audit_binary; "
+                f"audit_binary({to_wsl_path(binary)!r})")
         cmd = (f"cd {shlex.quote(WORKSPACE)} && python3 -W ignore -c "
-               f"\"from pwn_solver.code_auditor import audit_binary; "
-               f"audit_binary({wsl_binary})\"")
+               f"{shlex.quote(code)}")
         threading.Thread(target=lambda: self._run_stream(cmd, 60), daemon=True).start()
     
     def _run_offset(self):
@@ -480,11 +480,12 @@ class PwnSolverGUI:
         if not binary:
             messagebox.showerror("错误", "请先选择binary文件!")
             return
-        wsl_binary = shlex.quote(to_wsl_path(binary))
         self.log(f"\n🔍 偏移检测: {os.path.basename(binary)}", 'bold')
+        code = (f"from pwn_solver.gdb_debugger import GdbDebugger; "
+                f"g=GdbDebugger({to_wsl_path(binary)!r}); "
+                f"print('offset:', g.find_offset())")
         cmd = (f"cd {shlex.quote(WORKSPACE)} && python3 -W ignore -c "
-               f"\"from pwn_solver.gdb_debugger import GdbDebugger; "
-               f"g=GdbDebugger({wsl_binary}); print('offset:', g.find_offset())\"")
+               f"{shlex.quote(code)}")
         threading.Thread(target=lambda: self._run_stream(cmd, 30), daemon=True).start()
     
     # ========== 停止 ==========

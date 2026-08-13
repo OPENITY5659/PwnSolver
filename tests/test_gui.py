@@ -81,6 +81,33 @@ def test_gui_start_solve_no_pre_quote():
     assert 'build_solve_cmd(' in src
 
 
+def test_gui_audit_offset_cmd_building():
+    """代码审计/偏移检测命令: 路径用 Python 字面量 (repr) 嵌入 -c 代码
+
+    回归: 此前用 shlex.quote 的引号会被 bash 剥掉, python 收到裸路径
+    (如 /mnt/.../2026-07/stack1 → 2026-07 被解析为数字)
+    → SyntaxError: leading zeros... (用户真实使用 stack1 审计按钮时发现)
+    """
+    import inspect
+    import shlex
+    gui = _import_pwn_gui()
+    src = inspect.getsource(gui.PwnSolverGUI._run_audit)
+    # 必须用 repr (!r) 生成 python 字面量, 且整段 -c 代码 shlex.quote
+    assert '!r' in src
+    assert 'shlex.quote(code)' in src
+    # 模拟: 中文/数字路径构建后, bash 解析传给 python 的代码应语法合法
+    binary = '/mnt/d/CTF_Slover/PwnSolver/challenges/ret2win'
+    code = (f"from pwn_solver.code_auditor import audit_binary; "
+            f"audit_binary({binary!r})")
+    assert "'/mnt/d/CTF_Slover/PwnSolver/challenges/ret2win'" in code
+    # bash 剥外层引号后 python 收到的代码可编译
+    import subprocess
+    r = subprocess.run(['bash', '-c',
+                        f"python3 -c {shlex.quote(code)}"],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, f"审计命令执行失败: {r.stderr[:300]}"
+
+
 def test_exec_prefix():
     gui = _import_pwn_gui()
     prefix = gui.exec_prefix()
