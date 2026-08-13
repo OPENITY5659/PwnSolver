@@ -360,8 +360,8 @@ def decompile(binary_path, elf_strings=None):
                 off = int(m.group(2), 16)
                 regs[m.group(1).lstrip('e')] = f'var_{off:x}'
                 continue
-            # 4c) mov reg, [rsp+X] / [rbp-X] → 读栈变量
-            m = re.match(r'mov\s+([a-z0-9]+),\s*[a-z0-9]*\s*(?:QWORD|DWORD|BYTE)?\s*PTR\s*\[r(?:sp|bp)[+-]0x([0-9a-f]+)\]', insn_body)
+            # 4c) mov/movzx/movsxd reg, [rsp+X] / [rbp-X] → 读栈变量
+            m = re.match(r'mov(?:zx|sxd)?\s+([a-z0-9]+),\s*[a-z0-9]*\s*(?:QWORD|DWORD|BYTE)?\s*PTR\s*\[r(?:sp|bp)[+-]0x([0-9a-f]+)\]', insn_body)
             if m:
                 off = int(m.group(2), 16)
                 vname = 'buf' if off == max_off else f'var_{off:x}'
@@ -396,7 +396,7 @@ def decompile(binary_path, elf_strings=None):
                     tag = TAG_WIN
                 emit(line_txt, tag)
                 # 调用后参数寄存器失效 (避免残留到下一次调用)
-                for r in ('rdi', 'rsi', 'rdx'):
+                for r in ('rdi', 'rsi', 'rdx', 'rax', 'eax', 'al'):
                     regs.pop(r, None)
                 continue
             # 无符号 call (直接地址)
@@ -407,10 +407,24 @@ def decompile(binary_path, elf_strings=None):
                 if fn and is_user_func(fn):
                     emit(f'{indent()}{fn}();')
                 continue
-            # 6) cmp + 条件跳转 → if 结构 (寄存器显示名映射, 如 eax→retval)
+            # 6) cmp + 条件跳转 → if 结构
+            #    操作数优先显示已追踪的变量名 (mov eax,[rbp-0x4]; cmp eax,imm → var_4);
+            #    纯数字 (初始化值 0/1 等) 不是变量语义, 回退到显示名
             m = re.match(r'cmp\s+(\w+),\s*(0x[0-9a-f]+)', insn_body)
             if m:
-                pending_cond = (_reg_display(m.group(1)), m.group(2))
+                v = regs.get(m.group(1), regs.get(m.group(1).lstrip('e')))
+                if v is not None and not str(v).strip().lstrip('-').isdigit():
+                    op = v
+                else:
+                    op = _reg_display(m.group(1))
+                pending_cond = (op, m.group(2))
+                continue
+            # 6b) cmp DWORD/QWORD/BYTE PTR [rbp-X]/[rsp+X], imm → 直接内存比较
+            m = re.match(r'cmp\s+(?:DWORD|QWORD|BYTE)\s+PTR\s+\[r(?:sp|bp)[+-]0x([0-9a-f]+)\],\s*(0x[0-9a-f]+)', insn_body)
+            if m:
+                off = int(m.group(1), 16)
+                vname = 'buf' if off == max_off else f'var_{off:x}'
+                pending_cond = (vname, m.group(2))
                 continue
             m = re.match(r'j(?:e|ne|le|ge|a|b)\s+([0-9a-f]+)', insn_body)
             if m and pending_cond:
