@@ -104,6 +104,30 @@ def test_ret2win_direct_mode_with_main_win():
     compile(code, '<ret2win_direct>', 'exec')
 
 
+def test_ret2win_direct_win_return_safety():
+    """win 返回后接安全地址 (exit@plt/main) 且验证先 recv — stack1 真实场景回归
+
+    win() 打印 flag 后 ret 到栈上垃圾会 SIGSEGV; 且 win→main 重入后
+    再发 echo 会被下一轮 read 吃掉破坏栈 (stack1 真实使用发现)
+    """
+    from exploit_templates import Ret2WinExploit
+    analysis = _mk_analysis()
+    analysis['functions']['win'] = [('win', '0x401156')]
+    gadgets = {'specific': {'pop_rdi': None, 'libc_pop_rdi': 0x11bc7a, 'ret': 0x401016},
+               'plt': {'system': 0x401040}, 'arch': 'amd64'}
+    exp = Ret2WinExploit(binary_path=os.path.join(CHALLENGES, 'ret2win'),
+                         analysis=analysis, gadgets=gadgets, libc_path=None,
+                         verbose=False)
+    code = exp.generate()
+    # win 后接安全返回地址
+    assert 'after = EXIT_PLT if EXIT_PLT else MAIN' in code
+    assert 'payload += p64(after)' in code
+    # 验证先收输出 (不无条件发 echo)
+    assert 'output = p.recv(timeout=1)' in code
+    assert 'b\'flag\' in output' in code
+    compile(code, '<ret2win_safe_return>', 'exec')
+
+
 def test_ret2libc_no_poprdi_template_syntax():
     """无 pop_rdi 的 ret2libc 模板: 生成代码可编译且含对齐 ret"""
     from exploit_templates import Ret2LibcExploit
