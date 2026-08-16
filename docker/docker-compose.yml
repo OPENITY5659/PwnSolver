@@ -1,0 +1,15 @@
+services:
+  pwn-x86:
+    build:
+      context: ..
+      dockerfile: docker/pwn-x86.Dockerfile
+      platforms:
+        - linux/amd64
+    image: pwnsolver-x86:latest
+    platform: linux/amd64
+    volumes:
+      - ..:/pwnsolver
+      - ./ctf:/ctf
+    working_dir: /ctf
+    stdin_open: true
+    tty: true

@@ -48,6 +48,31 @@ def check():
         results.append(("gdb", True, first_line))
     except Exception as e:
         results.append(("gdb", False, str(e)))
+
+    # radare2 / rabin2（reverse-skill DeepRecon 使用）
+    import shutil
+    rabin2 = shutil.which("rabin2")
+    results.append(("radare2/rabin2", bool(rabin2), rabin2 or "未安装 (容器: scripts/pwn-x86)"))
+
+    # reverse-skill 知识库
+    try:
+        import os
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reverse_skill")
+        skills = [p.parent.name for p in __import__("pathlib").Path(root).rglob("SKILL.md")]
+        results.append(("reverse-skill 知识库", bool(skills), f"{len(skills)} 个 skill 已集成"))
+    except Exception as e:
+        results.append(("reverse-skill 知识库", False, str(e)))
+
+    # x86_64 容器（Apple Silicon 宿主机上的 PWN 沙盒）
+    import platform as _platform
+    if _platform.system() == "Darwin" and _platform.machine().lower() in ("arm64", "aarch64"):
+        try:
+            r = subprocess.run(["docker", "image", "inspect", "pwnsolver-x86:latest"],
+                               capture_output=True, text=True, timeout=15)
+            results.append(("x86_64 解题容器", r.returncode == 0,
+                            "pwnsolver-x86:latest" if r.returncode == 0 else "镜像未构建 (scripts/pwn-x86-build)"))
+        except Exception as e:
+            results.append(("x86_64 解题容器", False, str(e)))
     
     print("=" * 60)
     print("PWN 解题环境检查")

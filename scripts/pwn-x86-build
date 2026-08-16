@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# 构建 PwnSolver x86_64 解题镜像
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+IMAGE="${PWNSOLVER_X86_IMAGE:-pwnsolver-x86:latest}"
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "[-] docker 不可用。Apple Silicon 推荐安装/启动 OrbStack" >&2
+  exit 127
+fi
+
+DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-0}" docker build --platform linux/amd64 -t "$IMAGE" \
+  -f "$ROOT/docker/pwn-x86.Dockerfile" "$ROOT"
+echo "[+] 镜像构建完成: $IMAGE"
+echo "    使用 scripts/pwn-x86 进入容器"

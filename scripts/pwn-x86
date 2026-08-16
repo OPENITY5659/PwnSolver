@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# PwnSolver x86_64 sandbox wrapper (OrbStack / Docker on Apple Silicon)
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CWD="$(pwd)"
+IMAGE="${PWNSOLVER_X86_IMAGE:-pwnsolver-x86:latest}"
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "[-] docker 不可用。Apple Silicon 推荐安装/启动 OrbStack: https://orbstack.dev" >&2
+  exit 127
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  echo "[-] docker daemon 未运行，请先启动 OrbStack/Docker" >&2
+  exit 1
+fi
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "[*] 镜像 $IMAGE 不存在，开始构建（首次可能需要数分钟）..."
+  DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-0}" docker build --platform linux/amd64 -t "$IMAGE" \
+    -f "$ROOT/docker/pwn-x86.Dockerfile" "$ROOT"
+fi
+
+# 仓库根目录 -> /pwnsolver。
+# 若当前目录位于仓库内，直接用 /pwnsolver 下的相对路径，避免重复挂载。
+# 否则把当前目录挂到 /ctf。
+case "$CWD" in
+  "$ROOT"*)
+    WORKDIR="/pwnsolver${CWD#"$ROOT"}"
+    MOUNT_ARGS=(-v "$ROOT:/pwnsolver")
+    ;;
+  *)
+    WORKDIR="/ctf"
+    MOUNT_ARGS=(-v "$ROOT:/pwnsolver" -v "$CWD:/ctf")
+    ;;
+esac
+
+COMMON_ARGS=(
+  --platform linux/amd64
+  --rm
+  "${MOUNT_ARGS[@]}"
+  -w "$WORKDIR"
+  -e PWNSOLVER_X86=1
+  -e PYTHONUNBUFFERED=1
+)
+
+if [ "$#" -eq 0 ]; then
+  echo "[*] 进入 $IMAGE (仓库: /pwnsolver, 工作目录: $WORKDIR)"
+  exec docker run -it "${COMMON_ARGS[@]}" "$IMAGE" /bin/bash
+fi
+
+exec docker run -i "${COMMON_ARGS[@]}" "$IMAGE" "$@"

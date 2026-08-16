@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import argparse
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -32,7 +33,7 @@ from exploit_templates import (
 
 class PwnSolver:
     """自动PWN解题器"""
-    
+
     VULN_TYPES = {
         'ret2win': '存在win函数可直接跳转',
         'ret2libc': '需要泄露libc地址构造system("/bin/sh")',
@@ -41,76 +42,122 @@ class PwnSolver:
         'shellcode': '可执行栈/堆上的shellcode',
         'one_gadget': 'one_gadget直接getshell',
     }
-    
-    def __init__(self, binary_path, libc_path=None, remote=None, verbose=True, ld_path=None):
+
+    def __init__(self, binary_path, libc_path=None, remote=None, verbose=True, ld_path=None,
+                 enable_reverse_skill=True, skill_root=None, recon_workdir=None,
+                 deep_r2_analysis=False):
         self.binary_path = os.path.abspath(binary_path)
         self.libc_path = os.path.abspath(libc_path) if libc_path else None
         self.ld_path = os.path.abspath(ld_path) if ld_path else None
         self.remote = remote  # (host, port)
         self.verbose = verbose
-        
+
+        # reverse-skill 集成开关（默认开启）
+        self.enable_reverse_skill = enable_reverse_skill
+        self.skill_root = skill_root
+        self.recon_workdir = recon_workdir
+        self.deep_r2_analysis = deep_r2_analysis
+        self.reverse_intel = None
+        self.reverse_playbook = None
+        self.original_binary_path = None
+
         if not os.path.exists(self.binary_path):
             raise FileNotFoundError(f"Binary not found: {self.binary_path}")
-        
-        self.log("[*] 初始化 PwnSolver...")
-        
+
+        self.log("[*] 初始化 PwnSolver...  (reverse-skill 增强: {})".format(
+            "ON" if self.enable_reverse_skill else "OFF"))
+
+        # Step -1: reverse-skill 分诊——UPX 样本先解包到临时副本。
+        # 原始样本保留不动，符合 competition-reverse-pwn 的 artifact 保留原则。
+        if self.enable_reverse_skill:
+            self._maybe_unpack_upx()
+
         # Step 0: 自动检测同目录libc
+        # UPX 已解包时仍优先在原始样本目录找 libc/ld
         if not self.libc_path:
             try:
                 from badchars import auto_detect_libc
-                detected = auto_detect_libc(self.binary_path)
+                detected = auto_detect_libc(self.original_binary_path or self.binary_path)
                 if detected:
                     self.libc_path = detected
                     if verbose:
                         print(f"  🔍 自动检测到libc: {os.path.basename(detected)}")
             except ImportError: pass
-        
+
         # 核心组件
         self.analyzer = BinaryAnalyzer(self.binary_path, verbose=verbose)
         self.gadget_finder = GadgetFinder(self.binary_path, self.libc_path, verbose=verbose)
         self.interactor = None  # 延迟创建
-        
+
         # 分析结果
         self.vuln_type = None
         self.exploit = None
         self.exploit_result = None
-        
+
+    def _maybe_unpack_upx(self):
+        """reverse-skill elf-analysis.md: UPX! 标记 -> upx -d 到临时副本。"""
+        upx = shutil.which("upx")
+        if not upx:
+            return
+        try:
+            with open(self.binary_path, "rb") as fh:
+                prefix = fh.read(4 * 1024 * 1024)
+            if b"UPX!" not in prefix:
+                return
+
+            self.log("  [*] 检测到 UPX 壳，尝试安全解包（原始文件保持只读）...")
+            unpack_dir = tempfile.mkdtemp(prefix="pwnsolver_upx_")
+            unpacked = os.path.join(unpack_dir, os.path.basename(self.binary_path) + ".unpacked")
+            r = subprocess.run(
+                [upx, "-d", self.binary_path, "-o", unpacked],
+                capture_output=True, text=True, timeout=60,
+            )
+            if r.returncode == 0 and os.path.exists(unpacked):
+                self.original_binary_path = self.binary_path
+                self.binary_path = os.path.abspath(unpacked)
+                self.log(f"  [+] UPX 解包成功: {self.binary_path}")
+            else:
+                self.log(f"  [!] UPX 解包失败，继续按原文件分析: {(r.stderr or r.stdout).strip()[:160]}")
+                shutil.rmtree(unpack_dir, ignore_errors=True)
+        except Exception as exc:
+            self.log(f"  [!] UPX 自动解包跳过: {exc}")
+
     def log(self, msg):
         if self.verbose:
             print(msg, flush=True)
-    
+
     def analyze(self):
         """全面分析二进制文件"""
         self.log("\n" + "=" * 60)
         self.log("[*] 阶段1: 二进制分析")
         self.log("=" * 60)
-        
+
         # 基本信息
         info = self.analyzer.basic_info()
         self.log(f"  [+] 文件类型: {info['type']}")
         self.log(f"  [+] 架构: {info['arch']}")
         self.log(f"  [+] 位数: {info['bits']}")
-        
+
         # 安全机制
         protections = self.analyzer.checksec()
         self.log(f"  [+] 安全机制:")
         for k, v in protections.items():
             self.log(f"      {k}: {'启用' if v else '禁用'}")
-        
+
         # 函数分析
         functions = self.analyzer.find_interesting_functions()
         self.log(f"  [+] 危险函数: {functions.get('dangerous', [])}")
         self.log(f"  [+] 有用函数: {functions.get('useful', [])}")
         self.log(f"  [+] Win函数: {functions.get('win', [])}")
-        
+
         # 字符串
         interesting_strings = self.analyzer.find_interesting_strings()
         self.log(f"  [+] 关键字符串: {interesting_strings[:5]}...")
-        
+
         # 缓冲区信息
         buffers = self.analyzer.find_buffer_sizes()
         self.log(f"  [+] 缓冲区信息: {buffers}")
-        
+
         result = {
             'info': info,
             'protections': protections,
@@ -123,7 +170,7 @@ class PwnSolver:
         if hm:
             result['heap_menu'] = hm
             self.log(f"  [+] 堆菜单检测: {hm.get('heap_menu')} (free={hm.get('free_count')} calloc={hm.get('calloc_count')} scanf={hm.get('scanf_count')})")
-        
+
         # 新增检测结果日志
         ao = functions.get('array_overflow') or {}
         if ao.get('array_overflow'):
@@ -136,21 +183,125 @@ class PwnSolver:
         sp = functions.get('stack_pivot') or {}
         if sp.get('stack_pivot'):
             self.log(f"  [+] 栈迁移检测: lift={sp.get('stack_lift')} migrate={sp.get('stack_migrate')}")
-        
+
+        # reverse-skill: Deep Recon（rabin2/file/strings 结构化分诊）
+        if self.enable_reverse_skill:
+            self._apply_deep_recon(result)
+
         self.analysis = result  # 缓存供StrategyEngine使用
         return result
-    
+
+    def _apply_deep_recon(self, analysis):
+        """阶段1.5: reverse-skill 深度侦察，并把结果合并进 analysis。"""
+        self.log("\n" + "=" * 60)
+        self.log("[*] 阶段1.5: reverse-skill 深度侦察 (Deep Recon)")
+        self.log("=" * 60)
+        try:
+            from deep_recon import DeepRecon
+
+            # Evidence 始终针对原始 artifact；UPX 解包副本只用于后续 exploit 分析。
+            recon_target = self.original_binary_path or self.binary_path
+            recon = DeepRecon(
+                recon_target,
+                verbose=self.verbose,
+                workdir=self.recon_workdir,
+                run_r2_analysis=self.deep_r2_analysis,
+            )
+            intel = recon.run()
+            intel['analysis_binary_path'] = self.binary_path
+            self.reverse_intel = intel
+            analysis['reverse_intel'] = intel
+            analysis['_binary_path'] = self.binary_path
+            analysis['_libc_path'] = self.libc_path
+
+            # 合并 rabin2 的结构化证据到顶层，便于决策链消费
+            info = analysis.get('info', {})
+            info['binary_path'] = self.binary_path
+            info['original_binary_path'] = self.original_binary_path or self.binary_path
+            r2info = intel.get('info') or {}
+            if isinstance(r2info, dict):
+                info.setdefault('file_type', intel.get('file_type'))
+                if r2info.get('bintype'):
+                    info.setdefault('raw_type', r2info.get('bintype'))
+                if r2info.get('compiler'):
+                    info.setdefault('compiler', r2info.get('compiler'))
+                if r2info.get('lang'):
+                    info.setdefault('lang', r2info.get('lang'))
+
+            funcs = analysis.get('functions', {})
+            lang = intel.get('language') or {}
+            packed = intel.get('packed') or {}
+            anti = intel.get('anti_analysis') or {}
+            funcs['reverse_language'] = lang
+            funcs['packed'] = packed
+            funcs['anti_analysis'] = anti
+            funcs['reverse_imports'] = [
+                (str(i.get('name')), hex(int(i.get('plt', 0))))
+                for i in intel.get('imports', [])
+                if i.get('name')
+            ]
+            if lang.get('go') and not funcs.get('is_go_binary'):
+                funcs['is_go_binary'] = True
+            if r2info.get('stripped'):
+                funcs['stripped'] = True
+
+            # 证据落盘: pwnsolver_evidence/<binary>.recon.json|md
+            evidence = recon.write_evidence(intel)
+            analysis['reverse_evidence'] = evidence
+            self.log(f"  [+] recon 证据: {evidence['json']}")
+            self.log(f"  [+] sha256: {intel.get('sha256')}  entropy: {intel.get('entropy')}")
+            self.log(f"  [+] packer: {packed.get('packed')} ({packed.get('packer') or 'none'})  confidence={packed.get('confidence', 0)}")
+            self.log(f"  [+] language: go={lang.get('go')} rust={lang.get('rust')} cpp={lang.get('cpp')} stripped={r2info.get('stripped')}")
+            self.log(f"  [+] anti-analysis: {anti.get('anti_analysis')} seccomp={anti.get('seccomp')}")
+            tooling = intel.get('tooling') or {}
+            if tooling.get('need_x86_container'):
+                self.log("  [!] Apple Silicon + x86 ELF: 建议用 scripts/pwn-x86 进入 amd64 容器解题")
+        except FileNotFoundError:
+            self.log("  [-] DeepRecon 模块不存在，跳过 reverse-skill 侦察")
+        except Exception as e:
+            self.log(f"  [!] DeepRecon 失败，保留基础分析继续: {e}")
+
+    def build_reverse_playbook(self, analysis=None, gadgets=None):
+        """生成并保存 reverse-skill playbook；在漏洞类型确定后调用。"""
+        analysis = analysis or getattr(self, 'analysis', None)
+        gadgets = gadgets or getattr(self, 'gadgets', None)
+        if not self.enable_reverse_skill or not analysis:
+            return None
+        try:
+            from reverse_skill import PlaybookBuilder, SkillLibrary
+
+            analysis['_vuln_type'] = self.vuln_type[0] if isinstance(self.vuln_type, tuple) else self.vuln_type
+            library = SkillLibrary(self.skill_root)
+            playbook = PlaybookBuilder(library).build(analysis, gadgets or {})
+            self.reverse_playbook = playbook
+
+            evdir = analysis.get('reverse_evidence', {}).get('evidence_dir')
+            if evdir:
+                stem = Path(self.binary_path).stem or 'binary'
+                md_path = os.path.join(evdir, f'{stem}.playbook.md')
+                with open(md_path, 'w', encoding='utf-8') as f:
+                    f.write(playbook['markdown'])
+                playbook['markdown_path'] = md_path
+                self.log(f"  [+] reverse-skill playbook: {md_path}")
+            routes = playbook.get('routes', [])
+            if routes:
+                self.log(f"  [+] skill 路由: {' → '.join(r['id'] for r in routes[:4])}")
+            return playbook
+        except Exception as e:
+            self.log(f"  [!] playbook 生成失败: {e}")
+            return None
+
     def find_gadgets(self):
         """查找gadgets"""
         self.log("\n" + "=" * 60)
         self.log("[*] 阶段2: Gadget收集")
         self.log("=" * 60)
-        
+
         gadgets = self.gadget_finder.collect_all()
-        
+
         # ROPgadgets
         self.log(f"  [+] ROP gadgets: {len(gadgets.get('rop_gadgets', []))} 个")
-        
+
         # one_gadget
         og = gadgets.get('one_gadgets', [])
         if og:
@@ -159,20 +310,20 @@ class PwnSolver:
                 self.log(f"      {g}")
         else:
             self.log(f"  [-] 未找到one_gadget (没有libc?)")
-        
+
         # PLT/GOT
         self.log(f"  [+] PLT entries: {list(gadgets.get('plt', {}).keys())[:10]}")
         self.log(f"  [+] GOT entries: {list(gadgets.get('got', {}).keys())[:10]}")
-        
+
         self.gadgets = gadgets  # 缓存供StrategyEngine使用
         return gadgets
-    
+
     def determine_vuln_type(self, analysis, gadgets):
         """自动判断漏洞类型"""
         self.log("\n" + "=" * 60)
         self.log("[*] 阶段3: 漏洞类型判断")
         self.log("=" * 60)
-        
+
         funcs = analysis['functions']
         protections = analysis['protections']
         plt = gadgets.get('plt', {})
@@ -181,9 +332,9 @@ class PwnSolver:
         has_one_gadget = bool(gadgets.get('one_gadgets'))
         specific = gadgets.get('specific', {})
         has_pop_rdi = gadgets.get('pop_rdi_in_binary', bool(specific.get('pop_rdi')))
-        
+
         candidates = []
-        
+
         # 1. ret2win - 最高优先级（显式+推断win函数）
         # 但需要确认有实际的溢出风险（gets/scanf等不限制输入的函数）
         # fgets(buf, size, stdin) 是有界的，不构成栈溢出
@@ -195,14 +346,14 @@ class PwnSolver:
         has_system_plt = 'system' in plt
         has_binsh = funcs.get('has_binsh', False)
         pie_enabled = protections.get('pie', False)
-        
+
         # 检测是否有无界输入函数（真正的溢出风险）
         unbounded_funcs = {'gets', 'scanf', 'read', 'strcpy', 'strcat', 'sprintf', 'memcpy'}
         danger_names = {n.split('.')[-1].lower() for n, _ in funcs.get('dangerous', [])}
         has_real_overflow = bool(unbounded_funcs & danger_names)
         # fgets 有界但也可与格式字符串结合，所以不能完全排除
         is_fgets_only = danger_names == {'fgets'} or (danger_names <= {'fgets', 'printf'})
-        
+
         if real_win and has_real_overflow:
             confidence = 60 if pie_enabled else 100
             reason = f'存在win函数: {real_win[0][0]}'
@@ -229,12 +380,12 @@ class PwnSolver:
         elif has_system_plt and has_binsh:
             candidates.append(('ret2win', 78, f'system@plt+/bin/sh'))
             self.log(f"  [+] 候选: ret2win (推断) - system@plt + /bin/sh")
-        
+
         # 2. one_gadget - 有one_gadget优先(更简单，不需要leak也不需要pop_rdi)
         if has_one_gadget and has_dangerous:
             candidates.append(('one_gadget', 95, '有one_gadget可直接getshell'))
             self.log(f"  [+] 候选: one_gadget (置信度: 最高) - 无需pop_rdi")
-        
+
         # 3. ret2libc - 有pop_rdi时可用
         if has_dangerous and has_leak and protections.get('nx', True):
             if has_pop_rdi:
@@ -243,7 +394,7 @@ class PwnSolver:
             else:
                 candidates.append(('ret2libc', 50, 'NX+溢出但无pop_rdi'))
                 self.log(f"  [+] 候选: ret2libc (置信度: 低) - 无pop_rdi!")
-        
+
         # 4. format_string — 升级: 有win但无溢出→fmtstr写secret触发win
         if 'printf' in str(funcs.get('dangerous', [])):
             fmt_confidence = 60
@@ -254,12 +405,12 @@ class PwnSolver:
                 fmt_reason += ' + win函数(无溢出→fmtstr写变量)'
             candidates.append(('format_string', fmt_confidence, fmt_reason))
             self.log(f"  [+] 候选: format_string (置信度: {'高' if fmt_confidence >= 80 else '中'}) - {fmt_reason}")
-        
+
         # 5. shellcode
         if has_dangerous and not protections.get('nx', True):
             candidates.append(('shellcode', 75, 'NX禁用+溢出'))
             self.log(f"  [+] 候选: shellcode (置信度: 中高)")
-        
+
         # 6. heap - 检测malloc/free等堆函数
         has_heap_funcs = any(f in plt for f in ['malloc', 'free', 'calloc', 'realloc'])
         # 堆菜单检测: free/calloc/scanf + bss指针数组 (Add/Show/Edit/Delete菜单题)
@@ -280,30 +431,30 @@ class PwnSolver:
         elif has_heap_funcs:
             candidates.append(('heap', 40, '备选堆利用'))
             self.log(f"  [+] 备选: heap (置信度: 低)")
-        
+
         # 7. 通用ROP
         if has_dangerous and protections.get('nx', True) and not candidates:
             candidates.append(('rop', 40, '默认ROP'))
             self.log(f"  [+] 候选: rop (置信度: 低)")
-        
+
         if not candidates:
             self.log(f"  [!] 无法判断，默认ret2win尝试")
             candidates.append(('ret2win', 20, '默认'))
-        
+
         candidates.sort(key=lambda x: x[1], reverse=True)
         self.vuln_type = candidates[0]
         self.log(f"\n  [*] 选择策略: {self.vuln_type[0]} (置信度: {self.vuln_type[1]})")
-        
+
         return self.vuln_type
-    
+
     def generate_exploit(self, analysis, gadgets):
         """生成exploit代码"""
         self.log("\n" + "=" * 60)
         self.log("[*] 阶段4: 生成Exploit")
         self.log("=" * 60)
-        
+
         vuln_type = self.vuln_type[0]
-        
+
         exploit_map = {
             'ret2win': Ret2WinExploit,
             'ret2libc': Ret2LibcExploit,
@@ -315,12 +466,12 @@ class PwnSolver:
             'heap': HeapExploit,
             'ret2syscall': Ret2SyscallExploit,
         }
-        
+
         ExploitClass = exploit_map.get(vuln_type)
         if not ExploitClass:
             self.log(f"  [!] 不支持的漏洞类型: {vuln_type}")
             return None
-        
+
         self.exploit = ExploitClass(
             binary_path=self.binary_path,
             analysis=analysis,
@@ -330,12 +481,12 @@ class PwnSolver:
             verbose=self.verbose,
             ld_path=self.ld_path,
         )
-        
+
         code = self.exploit.generate()
         self.log(f"  [+] Exploit代码生成完毕 ({len(code)} bytes)")
-        
+
         return code
-    
+
     def _cleanup_cores(self):
         """清理core dump文件 (在binary所在目录和cores/)"""
         import glob
@@ -345,7 +496,7 @@ class PwnSolver:
                 for f in glob.glob(os.path.join(d, pat)):
                     try: os.remove(f)
                     except: pass
-    
+
     def test_exploit(self, timeout=None):
         """本地测试exploit — 返回结构化反馈"""
         if timeout is None:
@@ -354,11 +505,11 @@ class PwnSolver:
         self.log("\n" + "=" * 60)
         self.log("[*] 阶段5: 本地测试Exploit")
         self.log("=" * 60)
-        
+
         if not self.exploit:
             self.log("  [-] 没有可测试的exploit")
             return False
-        
+
         # 优先使用结构化反馈
         if hasattr(self.exploit, 'test_with_feedback'):
             feedback = self.exploit.test_with_feedback(timeout=timeout)
@@ -390,7 +541,7 @@ class PwnSolver:
             else:
                 self.log(f"  [-] 本地测试失败")
             return result
-    
+
     def solve(self, use_strategy=True):
         """主入口 — 完整决策链:
         ① libc? → ② 漏洞类型? → ③ 简单方法? → ④ 组合利用? → ⑤ 爆破? → ⑥ 诊断
@@ -398,7 +549,7 @@ class PwnSolver:
         self.log("\n" + "=" * 65)
         self.log(" PwnSolver — 自动PWN解题决策链")
         self.log("=" * 65)
-        
+
         try:
             # ====== Step 0: 自动检测libc ======
             if not self.libc_path:
@@ -409,18 +560,22 @@ class PwnSolver:
                         self.libc_path = detected
                         self.log(f"\n 🔍 自动检测到libc: {os.path.basename(detected)}")
                 except ImportError: pass
-            
+
             # ====== Step 1: 基础分析 ======
             analysis = self.analyze()
             if not analysis:
                 return False
             gadgets = self.find_gadgets()
             vuln_type = self.determine_vuln_type(analysis, gadgets)
-            
+
+            # reverse-skill: 漏洞类型确定后生成 playbook
+            if self.enable_reverse_skill:
+                self.build_reverse_playbook(analysis, gadgets)
+
             funcs = analysis.get('functions', {})
             protections = analysis.get('protections', {})
             plt = gadgets.get('plt', {})
-            
+
             # ====== Step 2: 决策摘要 ======
             self.log("\n" + "─" * 50)
             self.log(" 📋 决策摘要")
@@ -441,16 +596,19 @@ class PwnSolver:
             if 'printf' in plt or 'sprintf' in plt:
                 simple_methods.append("format_string")
             self.log(f"    可用: {simple_methods or '无 → 需组合利用'}")
-            
-            # 检查多要素
-            has_seccomp = self._check_seccomp(gadgets)
+
+            # 检查多要素（reverse-skill DeepRecon 的 libseccomp 证据也计入）
+            has_seccomp = self._check_seccomp(gadgets) or (analysis.get('reverse_intel') or {}).get('anti_analysis', {}).get('seccomp', False)
             has_heap = any(f in plt for f in ['malloc', 'free', 'calloc'])
-            has_overflow = bool([f for f in funcs.get('dangerous', []) 
+            has_overflow = bool([f for f in funcs.get('dangerous', [])
                                if 'gets' in str(f) or 'read' in str(f) or 'memcpy' in str(f)])
             has_array_overflow = (funcs.get('array_overflow') or {}).get('array_overflow', False)
             has_prng = (funcs.get('prng_info') or {}).get('prng_detected', False)
             has_stack_pivot = (funcs.get('stack_pivot') or {}).get('stack_pivot', False)
-            
+            packed = (funcs.get('packed') or {}).get('packed', False)
+            anti = funcs.get('anti_analysis') or {}
+            lang = funcs.get('reverse_language') or {}
+
             combo = []
             if has_seccomp: combo.append("seccomp→需ORW")
             if has_heap and has_overflow: combo.append("栈+堆组合")
@@ -459,19 +617,24 @@ class PwnSolver:
             if has_prng: combo.append("PRNG种子可爆破")
             if has_stack_pivot: combo.append("栈迁移可用")
             if funcs.get('is_go_binary'): combo.append("Go binary (syscall)")
+            if lang.get('go'): combo.append("Go 符号恢复")
+            if lang.get('rust'): combo.append("Rust 字符串驱动分析")
+            if packed: combo.append(f"packed: {funcs.get('packed', {}).get('packer') or 'unknown'}")
+            if anti.get('anti_analysis'): combo.append("反分析绕过")
+            if anti.get('seccomp'): combo.append("seccomp(syscall filter)")
             if combo:
                 self.log(f" ④ 组合: {', '.join(combo)}")
-            
+
             # ====== Step 3: 简单方法优先 ======
             self.log(f"\n ③ 尝试简单方法...")
-            
+
             # 3a: ret2win — 最简单
             if vuln_type[0] == 'ret2win' and vuln_type[1] >= 80:
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
                     self._print_success("ret2win")
                     return True
-            
+
             # 3a2: ret2syscall (binary有syscall+pop_rax+pop_rdi时优先，不需要libc)
             specific = gadgets.get('specific', {})
             has_syscall_gadgets = specific.get('syscall') and specific.get('pop_rax') and specific.get('pop_rdi')
@@ -482,7 +645,7 @@ class PwnSolver:
                 if code and self.test_exploit():
                     self._print_success("ret2syscall (binary gadgets)")
                     return True
-            
+
             # 3b: one_gadget (无seccomp时)
             if gadgets.get('one_gadgets') and not has_seccomp:
                 self.vuln_type = ('one_gadget', 95, '')
@@ -490,7 +653,7 @@ class PwnSolver:
                 if code and self.test_exploit():
                     self._print_success("one_gadget")
                     return True
-            
+
             # 3c: shellcode (NX禁用时)
             if not protections.get('nx', True) and has_overflow:
                 self.vuln_type = ('shellcode', 90, '')
@@ -498,7 +661,7 @@ class PwnSolver:
                 if code and self.test_exploit():
                     self._print_success("shellcode")
                     return True
-            
+
             # 3d: format string
             if 'printf' in plt:
                 self.vuln_type = ('format_string', 70, '')
@@ -506,17 +669,17 @@ class PwnSolver:
                 if code and self.test_exploit():
                     self._print_success("format_string")
                     return True
-            
+
             # ====== Step 4: 组合/高级方法 ======
             self.log(f"\n ④ 简单方法失败 → 尝试组合/高级方法")
-            
+
             # 4a: seccomp → ORW
             if has_seccomp:
                 self.log("  检测到seccomp → ORW引擎")
                 if self._try_auto_orw(analysis, gadgets):
                     self._print_success("ORW (seccomp绕过)")
                     return True
-            
+
             # 4b: ret2libc (有libc+pop_rdi)
             pop_rdi_ok = gadgets.get('pop_rdi_in_binary', False)
             if pop_rdi_ok and has_overflow and self.libc_path:
@@ -525,7 +688,7 @@ class PwnSolver:
                 if code and self.test_exploit():
                     self._print_success("ret2libc")
                     return True
-            
+
             # 4c: ret2syscall (fallback, 使用exploit模板)
             if specific.get('syscall') and specific.get('pop_rax') and specific.get('pop_rdi'):
                 self.log("  尝试ret2syscall (exploit模板)...")
@@ -552,7 +715,7 @@ class PwnSolver:
                             break
                 except Exception as e:
                     self.log(f"  setcontext+ORW失败: {e}")
-            
+
             # 4e: StackPivot + OneGadget (pwn5_x/yes_or_no风格)
             # 需: one_gadget + 无canary + (栈迁移或有溢出)
             if gadgets.get('one_gadgets') and not protections.get('canary') and (has_stack_pivot or has_overflow):
@@ -566,7 +729,7 @@ class PwnSolver:
                     self.log("  StackPivot exploit未成功，尝试bruteforce...")
                 except Exception as e:
                     self.log(f"  StackPivot失败: {e}")
-            
+
             # 4f: one_gadget bruteforce (yes_or_no fallback)
             if gadgets.get('one_gadgets') and has_stack_pivot:
                 self.log("  检测到栈迁移 → one_gadget爆破 (yes_or_no风格)")
@@ -576,7 +739,7 @@ class PwnSolver:
                         self.log(f"  寄存器清除: {list(clearing.keys())}")
                         from bruteforcer import BruteForcer
                         bf = BruteForcer(self.binary_path, verbose=self.verbose)
-                        
+
                         # Default success check: try echo PWNED_OK
                         def default_check(p):
                             try:
@@ -586,7 +749,7 @@ class PwnSolver:
                                 return b'PWNED_OK' in p.recv(timeout=2)
                             except Exception:
                                 return False
-                        
+
                         result = bf.brute_one_gadget_with_constraints(
                             one_gadgets=gadgets['one_gadgets'],
                             clearing_gadgets=clearing,
@@ -598,13 +761,13 @@ class PwnSolver:
                             return True
                 except Exception as e:
                     self.log(f"  OG爆破失败: {e}")
-            
+
             # 4f: 组合 — libc leak + one_gadget
             if gadgets.get('one_gadgets') and pop_rdi_ok:
                 self.log("  组合: leak libc → one_gadget")
                 # 尝试用ret2libc泄露+one_gadget跳转
                 # (这需要更复杂的逻辑，当前fallback到爆破)
-            
+
             # ====== Step 5: 爆破 ======
             self.log(f"\n ⑤ 组合方法失败 → 进入爆破/诊断模式")
             if use_strategy:
@@ -614,7 +777,7 @@ class PwnSolver:
                 if result:
                     self._print_success("爆破")
                     return True
-            
+
             # ====== Step 6: 自适应求解器 (反馈闭环) ======
             self.log(f"\n ⑥ 爆破失败 → 启动自适应求解器 (反馈闭环)")
             try:
@@ -633,22 +796,22 @@ class PwnSolver:
                 self.log(f"  自适应求解器不可用: {e}")
             except Exception as e:
                 self.log(f"  自适应求解器异常: {e}")
-            
+
             # ====== Step 7: 诊断 ======
             self._print_failure(analysis, gadgets, vuln_type)
             return False
-            
+
         except Exception as e:
             self.log(f"\n[!] 错误: {e}")
             import traceback
             traceback.print_exc()
             return False
-    
+
     def _print_success(self, method):
         self.log("\n" + "★" * 40)
         self.log(f"★ ✅ 解题成功! (方法: {method})")
         self.log("★" * 40)
-    
+
     def _print_failure(self, analysis, gadgets, vuln_type):
         self.log("\n" + "─" * 50)
         self.log(" 📋 失败诊断")
@@ -665,23 +828,23 @@ class PwnSolver:
         if protections.get('canary'): self.log(f"  Canary: YES → 需要canary泄露")
         if not self.libc_path: self.log(f"  libc: 未提供 → pip install LibcSearcher")
         self.log(f"\n  建议: {'gcc -static' if not gadgets.get('pop_rdi_in_binary') else '提供libc: -l libc.so.6'}")
-    
+
     def _check_seccomp(self, gadgets):
         """检测是否有seccomp限制"""
         plt = gadgets.get('plt', {})
         seccomp_funcs = ['seccomp_init', 'seccomp_load', 'seccomp_rule_add']
         return any(f in plt for f in seccomp_funcs)
-    
+
     def _try_auto_orw(self, analysis, gadgets):
         """自动尝试ORW绕过seccomp"""
         try:
             from orw_engine import ORWEngine
             self.log("\n[*] 自动ORW引擎启动...")
-            
-            orw = ORWEngine(self.binary_path, 
+
+            orw = ORWEngine(self.binary_path,
                           libc_path=self.libc_path,
                           verbose=self.verbose)
-            
+
             # 估算偏移量
             buffers = analysis.get('buffers', [])
             offset = 0x40
@@ -689,18 +852,18 @@ class PwnSolver:
                 if b['type'] == 'stack_frame' and 0x10 <= b['size'] <= 0x200:
                     offset = b['size'] + 8
                     break
-            
+
             code = orw.generate_exploit(offset=offset)
             if not code:
                 self.log("[-] ORW生成失败，缺少gadgets")
                 return False
-            
+
             # 保存并测试
             import tempfile, subprocess, time
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
                 f.write(code)
                 tmp_path = f.name
-            
+
             try:
                 self.log("[*] 测试ORW exploit...")
                 result = subprocess.run(
@@ -719,24 +882,24 @@ class PwnSolver:
             finally:
                 try: os.unlink(tmp_path)
                 except: pass
-            
+
         except ImportError:
             self.log("[-] ORW引擎模块不可用")
         except Exception as e:
             self.log(f"[-] ORW异常: {e}")
-        
+
         return False
-    
+
     def save_exploit_script(self, output_path=None):
         """保存生成的exploit脚本到 exploits/ 文件夹"""
         if not self.exploit or not self.exploit.code:
             self.log("  [-] 没有可保存的exploit")
             return None
-        
+
         # 创建 exploits 目录
         exploits_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'exploits')
         os.makedirs(exploits_dir, exist_ok=True)
-        
+
         if output_path is None:
             # 带时间戳的文件名
             import datetime
@@ -745,10 +908,10 @@ class PwnSolver:
             output_path = os.path.join(exploits_dir, f"exploit_{base}_{ts}.py")
         elif not os.path.isabs(output_path):
             output_path = os.path.join(exploits_dir, output_path)
-        
+
         with open(output_path, 'w') as f:
             f.write(self.exploit.code)
-        
+
         self.log(f"  [+] Exploit已保存到: {output_path}")
         return output_path
 
@@ -779,34 +942,52 @@ def main():
                         help='解题成功后进入交互shell')
     parser.add_argument('--shell-only', action='store_true',
                         help='仅运行最新exp并进入交互shell(不重新解题)')
-    
+    parser.add_argument('--no-skill', action='store_true',
+                        help='关闭 reverse-skill 增强（仅保留原有 PwnSolver 逻辑）')
+    parser.add_argument('--skill-root', default=None,
+                        help='reverse_skill 目录路径（默认: 仓库根目录/reverse_skill）')
+    parser.add_argument('--recon-only', action='store_true',
+                        help='仅执行基础分析 + reverse-skill 深度侦察 + playbook 后退出')
+    parser.add_argument('--recon-workdir', default=None,
+                        help='recon evidence 输出目录（默认: 二进制目录）')
+    parser.add_argument('--deep-r2', action='store_true',
+                        help='DeepRecon 额外运行 r2 aaa 函数级分析')
+
     args = parser.parse_args()
-    
+
     # Shell-only模式: 直接运行exp并交互
     if args.shell_only:
         _run_shell_only(args)
         return
-    
+
     remote = tuple(args.remote) if args.remote else None
-    
+
     solver = PwnSolver(
         binary_path=args.binary,
         libc_path=args.libc,
         ld_path=args.ld,
         remote=remote,
         verbose=not args.quiet,
+        enable_reverse_skill=not args.no_skill,
+        skill_root=args.skill_root,
+        recon_workdir=args.recon_workdir,
+        deep_r2_analysis=args.deep_r2,
     )
     # 注入超时配置
     solver._test_timeout = args.timeout
-    
+
+    if args.recon_only:
+        _run_recon_only(solver)
+        return
+
     success = solver.solve()
-    
+
     if args.output:
         solver.save_exploit_script(args.output)
-    
+
     # 总是保存一份
     exp_path = solver.save_exploit_script()
-    
+
     # 交互模式
     if args.interactive and success and exp_path:
         print(f"\n{'='*50}")
@@ -818,8 +999,39 @@ def main():
             env['PWN_REMOTE_PORT'] = str(remote[1])
             print(f"🌐 远程目标: {remote[0]}:{remote[1]}")
         subprocess.run([sys.executable, exp_path], cwd=os.path.dirname(exp_path) or '.', env=env)
-    
+
     sys.exit(0 if success else 1)
+
+
+def _run_recon_only(solver):
+    """--recon-only: 分析 + gadgets + 漏洞判断 + playbook，不进入 exploit 测试。"""
+    print()
+    print("=" * 60)
+    print(" PwnSolver reverse-skill 侦察模式")
+    print("=" * 60)
+    analysis = solver.analyze()
+    gadgets = solver.find_gadgets()
+    solver.determine_vuln_type(analysis, gadgets)
+    playbook = solver.build_reverse_playbook(analysis, gadgets)
+
+    if playbook and playbook.get('markdown_path'):
+        print()
+        print(f"Playbook: {playbook['markdown_path']}")
+    elif playbook:
+        print()
+        print(playbook.get('markdown', ''))
+
+    intel = analysis.get('reverse_intel') or {}
+    evidence = analysis.get('reverse_evidence') or {}
+    print()
+    print("Recon evidence:")
+    print(json.dumps(evidence, ensure_ascii=False, indent=2))
+    print()
+    print(f"结论: vuln_type={solver.vuln_type[0] if solver.vuln_type else 'unknown'}, "
+          f"packed={intel.get('packed', {}).get('packed')}, "
+          f"go={intel.get('language', {}).get('go')}, "
+          f"rust={intel.get('language', {}).get('rust')}, "
+          f"anti_analysis={intel.get('anti_analysis', {}).get('anti_analysis')}")
 
 
 def _run_shell_only(args):
@@ -828,25 +1040,25 @@ def _run_shell_only(args):
     if not os.path.exists(exploits_dir):
         print("exploits/ 目录不存在，请先解题生成exp")
         sys.exit(1)
-    
+
     binary = args.binary
     base = os.path.basename(binary) if binary else ""
-    
+
     exps = sorted(
         [f for f in os.listdir(exploits_dir) if f.endswith('.py')],
         key=lambda f: os.path.getmtime(os.path.join(exploits_dir, f)),
         reverse=True
     )
-    
+
     if not exps:
         print("没有找到exp文件")
         sys.exit(1)
-    
+
     # 优先匹配当前binary
     matching = [f for f in exps if base and base in f]
     exp_name = matching[0] if matching else exps[0]
     exp_path = os.path.join(exploits_dir, exp_name)
-    
+
     # 远程模式: 通过环境变量注入目标地址
     env = os.environ.copy()
     remote = getattr(args, 'remote', None)

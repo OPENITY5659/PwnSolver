@@ -80,3 +80,47 @@ def test_feedback_integration():
     """验证 exploit_templates 已支持 test_with_feedback"""
     from exploit_templates import BaseExploit
     assert hasattr(BaseExploit, 'test_with_feedback'), "Missing test_with_feedback"
+
+
+def test_generated_exploit_templates_are_syntactically_valid():
+    """reverse-skill pwn-chain 约束: 生成的 exploit 必须是可执行代码。"""
+    import tempfile
+    import os
+    from exploit_templates import (
+        OneGadgetExploit,
+        StackPivotExploit,
+        Ret2LibcExploit,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dummy = os.path.join(tmp, "dummy")
+        with open(dummy, "wb") as f:
+            f.write(b"\x7fELF")
+
+        analysis = {
+            "info": {"type": "ELF", "arch": "amd64", "bits": 64},
+            "protections": {"nx": True, "pie": False, "canary": False, "relro": False},
+            "functions": {
+                "dangerous": [("gets", "0x401000")],
+                "win": [],
+                "main": 0x401200,
+            },
+            "buffers": [{"type": "stack_frame", "size": 48}],
+        }
+        # 特意模拟“binary 无 pop_rdi”的分支，历史上生成过 IndentationError
+        gadgets = {
+            "arch": "amd64",
+            "specific": {"pop_rdi": None, "ret": 0x401301},
+            "plt": {"puts": "0x401030"},
+            "one_gadgets": [{"offset": "0x583dc", "constraints": "posix_spawn"}],
+        }
+
+        for cls in (Ret2LibcExploit, OneGadgetExploit, StackPivotExploit):
+            code = cls(
+                binary_path=dummy,
+                libc_path=None,
+                analysis=analysis,
+                gadgets=gadgets,
+                verbose=False,
+            ).generate()
+            compile(code, f"<{cls.__name__}>", "exec")
