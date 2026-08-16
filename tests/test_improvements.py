@@ -120,6 +120,7 @@ def test_generated_exploit_templates_are_syntactically_valid():
         OneGadgetExploit,
         StackPivotExploit,
         Ret2LibcExploit,
+        YesOrNoExploit,
     )
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -145,7 +146,7 @@ def test_generated_exploit_templates_are_syntactically_valid():
             "one_gadgets": [{"offset": "0x583dc", "constraints": "posix_spawn"}],
         }
 
-        for cls in (Ret2LibcExploit, OneGadgetExploit, StackPivotExploit):
+        for cls in (Ret2LibcExploit, OneGadgetExploit, StackPivotExploit, YesOrNoExploit):
             code = cls(
                 binary_path=dummy,
                 libc_path=None,

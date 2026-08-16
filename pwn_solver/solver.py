@@ -29,6 +29,7 @@ from exploit_templates import (
     StackPivotExploit,
     HeapExploit,
     BadBoyArrayOOBExploit,
+    YesOrNoExploit,
     Ret2SyscallExploit,
 )
 
@@ -414,6 +415,13 @@ class PwnSolver:
             candidates.append(('array_oob', 96, 'BadBoy式数组越界: stack/libc泄露 + 负索引写puts@got'))
             self.log(f"  [+] 候选: array_oob (置信度: 最高) - {array_oob.get('strategy_hint', 'BadBoy style')}")
 
+        # 3.6 yes_or_no: 只有 read，反复进入 yes()，pop r12/r15 清 one_gadget 约束
+        yon = funcs.get('yes_or_no_style') or {}
+        if yon.get('yes_or_no'):
+            candidates.append(('yes_or_no', 97, 'yes_or_no式抬栈 + one_gadget'))
+            self.log(f"  [+] 候选: yes_or_no (置信度: 最高) - clear_r12={yon.get('clear_r12')} clear_r15={yon.get('clear_r15')}")
+
+
         # 4. format_string — 升级: 有win但无溢出→fmtstr写secret触发win
         if 'printf' in str(funcs.get('dangerous', [])):
             fmt_confidence = 60
@@ -484,6 +492,7 @@ class PwnSolver:
             'stack_pivot': StackPivotExploit,
             'heap': HeapExploit,
             'array_oob': BadBoyArrayOOBExploit,
+            'yes_or_no': YesOrNoExploit,
             'ret2syscall': Ret2SyscallExploit,
         }
 
@@ -649,12 +658,18 @@ class PwnSolver:
             self.log(f"\n ③ 尝试简单方法...")
 
 
-            # 3a0: reverse-skill 签名的 BadBoy array-OOB（优先于 one_gadget 等栈方法）
+            # 3a0: reverse-skill 签名的 BadBoy array-OOB / yes_or_no（优先于通用栈方法）
             if vuln_type[0] == 'array_oob' and vuln_type[1] >= 90:
                 self.log("  尝试 BadBoy 数组越界利用 (stack/libc leak + puts@got 覆写)...")
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit():
                     self._print_success("array_oob (BadBoy)")
+                    return True
+            if vuln_type[0] == 'yes_or_no' and vuln_type[1] >= 90:
+                self.log("  尝试 yes_or_no 抬栈 + one_gadget...")
+                code = self.generate_exploit(analysis, gadgets)
+                if code and self.test_exploit(timeout=30):
+                    self._print_success("yes_or_no + one_gadget")
                     return True
 
             # 3a: ret2win — 最简单

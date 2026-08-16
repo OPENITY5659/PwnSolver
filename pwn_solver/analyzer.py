@@ -178,6 +178,9 @@ class BinaryAnalyzer:
             
             # === 新增: 栈提升/栈迁移检测 ===
             self._stack_pivot = self._detect_stack_pivot(disasm)
+
+            # === 新增: yes_or_no 签名 ===
+            self._yes_or_no = self._detect_yes_or_no(disasm)
             
         except Exception:
             pass
@@ -197,6 +200,7 @@ class BinaryAnalyzer:
             'prng_info': getattr(self, '_prng_info', {}),
             'is_go_binary': getattr(self, '_is_go_binary', False),
             'stack_pivot': getattr(self, '_stack_pivot', {}),
+            'yes_or_no_style': getattr(self, '_yes_or_no', {}),
             'inner_overflows': getattr(self, '_inner_overflows', []),
             'input_stages': self._detect_input_stages(),
         }
@@ -446,6 +450,20 @@ class BinaryAnalyzer:
         
         return info
     
+    def _detect_yes_or_no(self, disasm):
+        """yes_or_no 签名：只有 read，main 反复进入 yes()，pop r12/r15 清约束。"""
+        info = {'yes_or_no': False, 'repeated_yes': False,
+                'clear_r12': False, 'clear_r15': False}
+        if '<yes>' not in disasm or '<read@plt>' not in disasm:
+            return info
+        if '<puts@plt>' in disasm or '<write@plt>' in disasm:
+            return info
+        info['yes_or_no'] = True
+        info['clear_r12'] = bool(re.search(r'pop\s+r12', disasm))
+        info['clear_r15'] = bool(re.search(r'pop\s+r15', disasm))
+        info['repeated_yes'] = len(re.findall(r'call\s+.*<yes>', disasm)) >= 1
+        return info
+
     def find_interesting_strings(self):
         """查找有趣字符串"""
         interesting = []

@@ -36,6 +36,6 @@
   setcontext gadget 0x580dd，ret 0x25679，pop_rdi 0x26b72，pop_rsi 0x27529，
   pop_rdx_r12 0x11c1e1。
 
-## pwn5 yes_or_no（PwnSolver 待完善自动爆破）
+## pwn5 yes_or_no（PwnSolver 已覆盖本地 full-p64，远程为 3-byte brute）
 - 栈可重复进入 `yes()`，用 `pop r12/r15` 清空 one_gadget 约束，抬栈后爆破 one_gadget 低 3 字节。
 - 官方：`one=0xe3b2e`，`pop_r12=0x401176`，`pop_r15=0x401179`，`yes=0x401150`。

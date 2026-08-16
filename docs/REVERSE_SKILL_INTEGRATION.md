@@ -148,11 +148,11 @@ scripts/sync_reverse_skill.sh
 | BadBoy-2 | CTFshow 2024 元旦 pwn1 | ✅ 自动 BadBoy array-OOB 成功 |
 | pwn03 Happy_New_Year | CTFshow 2024 元旦 pwn3 | ⚠ 已识别 heap 菜单；自动利用待实现（官方 WP 偏移已收录） |
 | pwn04 Heap_Harmony_Festivity | CTFshow 2024 元旦 pwn4 | ⚠ 已识别 heap 菜单；setcontext+ORW 自动利用待实现 |
-| pwn5 yes_or_no | CTFshow 2024 元旦 pwn5 | ⚠ 已识别 one_gadget 爆破路径；自动爆破待增强 |
+| pwn5 yes_or_no | CTFshow 2024 元旦 pwn5 | ✅ 自动 yes_or_no 抬栈 + one_gadget 成功（需 libc-2.31.so） |
 
 关键修复：
 - `find_pop_rsi_rdi_gadget` 之前会选中带 `add bl, al` 前缀的伪 gadget。
 - `Ret2SyscallExploit` 之前 PRNG 循环体缩进错误、`p.clean` 破坏 stdin-only 题目、payload padding 覆盖 `0x50`。
 - `BaseExploit.launch_code` 改用 loader `--library-path`，避免目标 shell 继承旧 libc 路径。
-- 新增 BadBoy 签名检测与 `BadBoyArrayOOBExploit`。
+- 新增 BadBoy 签名检测与 `BadBoyArrayOOBExploit`、`YesOrNoExploit`。
 - GUI 增加 reverse-skill/recon/x86 sandbox 开关、LD 自动检测、报告入口、环境自检。
