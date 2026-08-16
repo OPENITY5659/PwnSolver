@@ -333,7 +333,31 @@ class BinaryAnalyzer:
             info['write_possible'] = bool(re.search(
                 r'call\s+.*<(?:read|fgets|gets)@plt>', disasm
             ))
-        
+
+        # BadBoy 签名（CTFshow 2024 元旦水友赛 pwn1）：
+        #   scanf("%ld") -> 有符号 byte 索引 -> write(fd, stack_buf+idx, len) 泄露
+        #   scanf("%lld") -> 检查 <=8 的负数索引 -> read(0, stack_buf+idx, 3) 任意写
+        try:
+            result = subprocess.run(
+                ['strings', self.binary_path],
+                capture_output=True, text=True, timeout=10
+            )
+            strs = result.stdout or ''
+            if ('i am bad boy' in strs and 'HaHaHa' in strs
+                    and 'so can you fell me' in strs
+                    and '<write@plt>' in disasm and '<read@plt>' in disasm
+                    and re.search(r'movsxd\s+r\w+,\s*e?d', disasm)):
+                info.update({
+                    'array_overflow': True,
+                    'badboy_style': True,
+                    'negative_index_possible': True,
+                    'leak_possible': True,
+                    'write_possible': True,
+                    'strategy_hint': 'badboy_leak_stack_libc_then_overwrite_puts_got',
+                })
+        except Exception:
+            pass
+
         return info
     
     def _detect_prng_usage(self, disasm):

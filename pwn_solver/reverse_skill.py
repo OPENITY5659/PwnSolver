@@ -114,6 +114,7 @@ class SkillLibrary:
             "skills/pwn-chain/references/stack-pwn.md",
             "skills/pwn-chain/references/heap-pwn.md",
             "skills/pwn-chain/references/kernel-pwn.md",
+            "skills/pwn-chain/references/ctfshow-2024-newyear-official-wp.md",
             "skills/reverse-engineering/elf-analysis.md",
             "skills/reverse-engineering/anti-analysis.md",
             "skills/reverse-engineering/go-reverse.md",

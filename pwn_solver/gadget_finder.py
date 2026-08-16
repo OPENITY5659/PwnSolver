@@ -429,6 +429,9 @@ class GadgetFinder:
         if self.libc:
             gadgets += self._cache.get('libc_rop_gadgets', []) or self.find_rop_gadgets(self.libc_path)
         
+        exact_rdi_candidate = None
+        exact_r15_candidate = None
+        fallback_candidate = None
         for g in gadgets:
             if ':' not in g:
                 continue
@@ -437,14 +440,29 @@ class GadgetFinder:
             except ValueError:
                 continue
             insns = g.split(':', 1)[1].strip().lower() if ':' in g else ''
-            
-            # pop rsi; pop r15; ret 或 pop rsi; pop rdi; ret
-            if 'pop rsi' in insns and 'pop rdi' in insns and 'ret' in insns:
-                # 确保没有call干扰
-                if 'call' not in insns:
-                    return addr
-        
-        return None
+
+            # pop rsi; pop rdi; ret（也兼容 pop rsi; pop r15; ret）
+            if 'pop rsi' not in insns or 'ret' not in insns:
+                continue
+            if 'call' in insns or 'jmp' in insns:
+                continue
+            toks = [t.strip() for t in insns.replace(',', ' ').split(';')]
+            has_rdi = any(t.startswith('pop rdi') for t in toks)
+            has_r15 = any(t.startswith('pop r15') for t in toks)
+            if not (has_rdi or has_r15):
+                continue
+            # 优先指令序列恰好以 pop rsi 开头（ROPgadget 有时会包含前置 nop/add）
+            # pop rdi 版本优于 pop r15 版本：pop r15 后多 pop 一个寄存器会破坏 ROP 布局。
+            if toks and toks[0].startswith('pop rsi'):
+                if has_rdi and exact_rdi_candidate is None:
+                    exact_rdi_candidate = addr
+                elif has_r15 and exact_r15_candidate is None:
+                    exact_r15_candidate = addr
+                continue
+            if fallback_candidate is None:
+                fallback_candidate = addr
+
+        return exact_rdi_candidate or exact_r15_candidate or fallback_candidate
     
     def generate_ret2syscall_chain(self, binsh_addr=0x601090):
         """生成ret2syscall ROP链 (s.s.a.l风格)

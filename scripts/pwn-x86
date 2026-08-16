@@ -39,6 +39,8 @@ esac
 COMMON_ARGS=(
   --platform linux/amd64
   --rm
+  --cap-add=SYS_PTRACE
+  --security-opt seccomp=unconfined
   "${MOUNT_ARGS[@]}"
   -w "$WORKDIR"
   -e PWNSOLVER_X86=1

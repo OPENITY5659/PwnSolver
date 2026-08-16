@@ -43,7 +43,8 @@ class TaskManager:
         self.tasks = {}      # task_id -> {status, stdout, stderr, rc, start}
         self.lock = threading.Lock()
     
-    def submit(self, binary, libc=None, timeout=60):
+    def submit(self, binary, libc=None, timeout=60, ld=None, remote=None,
+               no_skill=False, recon_only=False):
         task_id = uuid.uuid4().hex[:12]
         with self.lock:
             if len(self.tasks) >= MAX_TASKS:
@@ -55,6 +56,14 @@ class TaskManager:
                    str(binary)]
             if libc:
                 cmd += ['-l', str(libc)]
+            if ld:
+                cmd += ['-d', str(ld)]
+            if remote and len(remote) == 2:
+                cmd += ['-r', str(remote[0]), str(int(remote[1]))]
+            if no_skill:
+                cmd += ['--no-skill']
+            if recon_only:
+                cmd += ['--recon-only']
             cmd += ['-t', str(timeout)]
             
             try:
@@ -248,8 +257,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == '/status':
+                import platform as _platform
                 self._json({'ok': True, 'status': 'alive', 'tasks': len(TASKS.tasks),
-                            'sessions': len(INTERACT.sessions), 'time': time.time()})
+                            'sessions': len(INTERACT.sessions), 'time': time.time(),
+                            'platform': {'system': _platform.system(), 'machine': _platform.machine()},
+                            'features': ['reverse-skill', 'deep-recon', 'playbook']})
             elif path.startswith('/solve/'):
                 tid = path.split('/')[-1]
                 t = TASKS.get(tid)
@@ -296,8 +308,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({'error': 'binary required'}, 400)
                     return
                 libc = body.get('libc')
+                ld = body.get('ld')
+                remote = body.get('remote')
                 timeout = min(max(int(body.get('timeout') or 60), 1), MAX_TIMEOUT)
-                tid = TASKS.submit(binary, libc, timeout)
+                tid = TASKS.submit(binary, libc, timeout, ld=ld, remote=remote,
+                                   no_skill=bool(body.get('no_skill')),
+                                   recon_only=bool(body.get('recon_only')))
                 self._json({'ok': True, 'task_id': tid, 'poll': f'/solve/{tid}'})
             elif path == '/interact':
                 binary = body.get('binary')

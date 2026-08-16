@@ -79,3 +79,25 @@ def auto_detect_libc(binary_path):
         except: pass
     
     return None  # 只返回明确命名的libc，不fallback到随机ELF
+
+
+def auto_detect_ld(binary_path, libc_path=None):
+    """自动检测同目录（或 libc 同目录）下的 ld-linux 加载器。"""
+    import os as _os
+    dirs = {_os.path.dirname(_os.path.abspath(binary_path))}
+    if libc_path:
+        dirs.add(_os.path.dirname(_os.path.abspath(libc_path)))
+    for d in dirs:
+        if not _os.path.isdir(d):
+            continue
+        for name in sorted(_os.listdir(d)):
+            low = name.lower()
+            if 'ld-linux' in low or 'ld-linux' in low and low.endswith('.so.2') or low.startswith('ld-') and 'linux' in low:
+                path = _os.path.join(d, name)
+                try:
+                    with open(path, 'rb') as fp:
+                        if fp.read(4) == b'\x7fELF':
+                            return path
+                except Exception:
+                    pass
+    return None

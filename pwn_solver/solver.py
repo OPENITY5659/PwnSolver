@@ -28,6 +28,7 @@ from exploit_templates import (
     OneGadgetExploit,
     StackPivotExploit,
     HeapExploit,
+    BadBoyArrayOOBExploit,
     Ret2SyscallExploit,
 )
 
@@ -72,7 +73,7 @@ class PwnSolver:
         if self.enable_reverse_skill:
             self._maybe_unpack_upx()
 
-        # Step 0: 自动检测同目录libc
+        # Step 0: 自动检测同目录libc / ld
         # UPX 已解包时仍优先在原始样本目录找 libc/ld
         if not self.libc_path:
             try:
@@ -82,6 +83,18 @@ class PwnSolver:
                     self.libc_path = detected
                     if verbose:
                         print(f"  🔍 自动检测到libc: {os.path.basename(detected)}")
+            except ImportError: pass
+        if not self.ld_path:
+            try:
+                from badchars import auto_detect_ld
+                detected_ld = auto_detect_ld(
+                    self.original_binary_path or self.binary_path,
+                    self.libc_path,
+                )
+                if detected_ld:
+                    self.ld_path = detected_ld
+                    if verbose:
+                        print(f"  🔍 自动检测到ld: {os.path.basename(detected_ld)}")
             except ImportError: pass
 
         # 核心组件
@@ -395,6 +408,12 @@ class PwnSolver:
                 candidates.append(('ret2libc', 50, 'NX+溢出但无pop_rdi'))
                 self.log(f"  [+] 候选: ret2libc (置信度: 低) - 无pop_rdi!")
 
+        # 3.5 BadBoy array-OOB: 越界读泄露 stack/libc + 负数索引覆写 puts@got
+        array_oob = funcs.get('array_overflow') or {}
+        if array_oob.get('badboy_style'):
+            candidates.append(('array_oob', 96, 'BadBoy式数组越界: stack/libc泄露 + 负索引写puts@got'))
+            self.log(f"  [+] 候选: array_oob (置信度: 最高) - {array_oob.get('strategy_hint', 'BadBoy style')}")
+
         # 4. format_string — 升级: 有win但无溢出→fmtstr写secret触发win
         if 'printf' in str(funcs.get('dangerous', [])):
             fmt_confidence = 60
@@ -464,6 +483,7 @@ class PwnSolver:
             'one_gadget': OneGadgetExploit,
             'stack_pivot': StackPivotExploit,
             'heap': HeapExploit,
+            'array_oob': BadBoyArrayOOBExploit,
             'ret2syscall': Ret2SyscallExploit,
         }
 
@@ -627,6 +647,15 @@ class PwnSolver:
 
             # ====== Step 3: 简单方法优先 ======
             self.log(f"\n ③ 尝试简单方法...")
+
+
+            # 3a0: reverse-skill 签名的 BadBoy array-OOB（优先于 one_gadget 等栈方法）
+            if vuln_type[0] == 'array_oob' and vuln_type[1] >= 90:
+                self.log("  尝试 BadBoy 数组越界利用 (stack/libc leak + puts@got 覆写)...")
+                code = self.generate_exploit(analysis, gadgets)
+                if code and self.test_exploit():
+                    self._print_success("array_oob (BadBoy)")
+                    return True
 
             # 3a: ret2win — 最简单
             if vuln_type[0] == 'ret2win' and vuln_type[1] >= 80:

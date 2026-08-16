@@ -82,6 +82,36 @@ def test_feedback_integration():
     assert hasattr(BaseExploit, 'test_with_feedback'), "Missing test_with_feedback"
 
 
+def test_pop_rsi_rdi_prefers_exact_gadget():
+    """ROPgadget 会输出前置 add/nop 的伪 gadget；必须优先精确 pop rsi; pop rdi; ret。"""
+    from gadget_finder import GadgetFinder
+    gf = GadgetFinder.__new__(GadgetFinder)
+    gf._cache = {
+        'rop_gadgets': [
+            '0x40082f : add bl, al ; pop rsi ; pop rdi ; ret',
+            '0x400961 : pop rsi ; pop r15 ; ret',
+            '0x400831 : pop rsi ; pop rdi ; ret',
+        ],
+        'libc_rop_gadgets': [],
+    }
+    gf.libc = None
+    assert gf.find_pop_rsi_rdi_gadget() == 0x400831
+
+
+def test_badboy_exploit_template_compiles():
+    from exploit_templates import BadBoyArrayOOBExploit
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as tmp:
+        dummy = os.path.join(tmp, "dummy")
+        with open(dummy, "wb") as f:
+            f.write(b"\x7fELF")
+        code = BadBoyArrayOOBExploit(
+            binary_path=dummy, libc_path=None,
+            analysis={}, gadgets={'arch': 'amd64'}, verbose=False,
+        ).generate()
+        compile(code, "<BadBoyArrayOOBExploit>", "exec")
+
+
 def test_generated_exploit_templates_are_syntactically_valid():
     """reverse-skill pwn-chain 约束: 生成的 exploit 必须是可执行代码。"""
     import tempfile
