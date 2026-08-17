@@ -40,12 +40,12 @@ docker run --platform linux/amd64 --rm -it -v "$PWD:/work" -w /work pwnsolver-x8
 网络不适合构建时，可直接下载已打包镜像：
 
 ```bash
-gh release download v0.1.0-x86-image -R OPENITY5659/PwnSolver -p pwnsolver-x86.tar.zst
+# 本地已生成归档时
 scripts/load-x86-image.sh ./pwnsolver-x86.tar.zst
 ```
 
-> Docker Hub/GHCR 推送需要额外 token scope；当前采用 GitHub Release 分发
-> `docker save | zstd` 归档，不需要 registry。
+> 推荐使用 `.github/workflows/publish-x86-image.yml` 推送 GHCR（GitHub token 天然有 packages 权限）；
+> Docker Hub 可在仓库 Secrets 配置 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` 后自动推送。
 
 
 ## 镜像发布方式
