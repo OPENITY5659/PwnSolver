@@ -35,5 +35,5 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/pwnsolver-x86:latest
-            ghcr.io/${{ github.repository_owner }}/pwnsolver-x86:${{ github.sha }}
+            ghcr.io/openity5659/pwnsolver-x86:latest
+            ghcr.io/openity5659/pwnsolver-x86:${{ github.sha }}
