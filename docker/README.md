@@ -33,3 +33,25 @@ scripts/pwn-x86 bash -lc "cd /ctf && python3 /pwnsolver/pwn_solver/solver.py ./v
 docker build --platform linux/amd64 -t pwnsolver-x86:latest -f docker/pwn-x86.Dockerfile .
 docker run --platform linux/amd64 --rm -it -v "$PWD:/work" -w /work pwnsolver-x86:latest
 ```
+
+
+## 预构建镜像（GitHub Release）
+
+网络不适合构建时，可直接下载已打包镜像：
+
+```bash
+gh release download v0.1.0-x86-image -R OPENITY5659/PwnSolver -p pwnsolver-x86.tar.zst
+scripts/load-x86-image.sh ./pwnsolver-x86.tar.zst
+```
+
+> Docker Hub/GHCR 推送需要额外 token scope；当前采用 GitHub Release 分发
+> `docker save | zstd` 归档，不需要 registry。
+
+
+## 镜像发布方式
+
+- 推荐：GitHub Actions workflow `.github/workflows/publish-x86-image.yml`
+  推送到 `ghcr.io/<owner>/pwnsolver-x86:latest`；若配置 `DOCKERHUB_USERNAME/DOCKERHUB_TOKEN`
+  可同时推 Docker Hub。
+- 免构建：GitHub Release `v0.1.0-x86-image` 提供 `docker save | zstd` 归档，
+  使用 `scripts/load-x86-image.sh` 导入。

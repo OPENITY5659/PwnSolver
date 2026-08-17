@@ -211,8 +211,8 @@ class RuntimeRouter:
         }
 
     def describe(self) -> str:
-        if self.os_name == 'Darwin' and self.machine in ('arm64', 'aarch64'):
-            return 'Apple Silicon -> linux/amd64 Docker sandbox'
+        if self.os_name == 'Darwin':
+            return 'macOS -> linux/amd64 Docker sandbox (mandatory)'
         if self.os_name == 'Windows' and self.docker_ok:
             return 'Windows -> Docker Desktop linux/amd64 sandbox'
         if self.os_name == 'Windows' and self.wsl_ok:

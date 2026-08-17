@@ -265,7 +265,7 @@ class PwnSolver:
             self.log(f"  [+] recon 证据: {evidence['json']}")
             self.log(f"  [+] sha256: {intel.get('sha256')}  entropy: {intel.get('entropy')}")
             self.log(f"  [+] packer: {packed.get('packed')} ({packed.get('packer') or 'none'})  confidence={packed.get('confidence', 0)}")
-            self.log(f"  [+] language: go={lang.get('go')} rust={lang.get('rust')} cpp={lang.get('cpp')} stripped={r2info.get('stripped')}")
+            self.log(f"  [+] language: go={lang.get('go')} rust={lang.get('rust')} cpp={lang.get('cpp')} protobuf_c={lang.get('protobuf_c')} stripped={r2info.get('stripped')}")
             self.log(f"  [+] anti-analysis: {anti.get('anti_analysis')} seccomp={anti.get('seccomp')}")
             tooling = intel.get('tooling') or {}
             if tooling.get('need_x86_container'):
@@ -310,6 +310,30 @@ class PwnSolver:
         self.log("\n" + "=" * 60)
         self.log("[*] 阶段2: Gadget收集")
         self.log("=" * 60)
+
+        # Go/CGO 二进制动辄数 MB，ROPgadget 全量扫描没有意义且会超时。
+        analysis = getattr(self, 'analysis', {}) or {}
+        funcs = analysis.get('functions') or {}
+        lang = funcs.get('reverse_language') or {}
+        if funcs.get('is_go_binary') or lang.get('go'):
+            self.log("  [!] Go/CGO binary: 跳过全量 ROPgadget 扫描")
+            try:
+                pltgot = self.gadget_finder.get_plt_got()
+                gadgets = {
+                    'rop_gadgets': [],
+                    'one_gadgets': self.gadget_finder.find_one_gadgets(),
+                    'specific': {},
+                    'pop_rdi_in_binary': False,
+                    'plt': pltgot.get('plt', {}),
+                    'got': pltgot.get('got', {}),
+                    'libc_info': self.gadget_finder.get_libc_base_info(),
+                    'skip_rop': True,
+                    'go_binary': True,
+                }
+                self.gadgets = gadgets
+                return gadgets
+            except Exception as exc:
+                self.log(f"  [!] Go gadgets 降级失败: {exc}")
 
         gadgets = self.gadget_finder.collect_all()
 
@@ -396,9 +420,14 @@ class PwnSolver:
             self.log(f"  [+] 候选: ret2win (推断) - system@plt + /bin/sh")
 
         # 2. one_gadget - 有one_gadget优先(更简单，不需要leak也不需要pop_rdi)
-        if has_one_gadget and has_dangerous:
+        # seccomp/libseccomp 题目 execve 会被过滤，one_gadget 不应作为主策略。
+        has_seccomp_funcs = any(f in plt for f in ('seccomp_init', 'seccomp_load', 'seccomp_rule_add'))
+        if has_one_gadget and has_dangerous and not has_seccomp_funcs:
             candidates.append(('one_gadget', 95, '有one_gadget可直接getshell'))
             self.log(f"  [+] 候选: one_gadget (置信度: 最高) - 无需pop_rdi")
+        elif has_one_gadget and has_seccomp_funcs:
+            candidates.append(('one_gadget', 30, 'seccomp过滤execve，仅作备份'))
+            self.log(f"  [+] 候选: one_gadget (置信度: 低) - seccomp 环境禁止 execve")
 
         # 3. ret2libc - 有pop_rdi时可用
         if has_dangerous and has_leak and protections.get('nx', True):
@@ -471,14 +500,17 @@ class PwnSolver:
         # 泛化模式引擎 overlay：同名模式用更完整信号修正置信度
         try:
             from pattern_engine import PatternEngine
-            gadgets.setdefault('xor_gadgets', self.gadget_finder.find_xor_gadgets())
+            if gadgets.get('skip_rop'):
+                gadgets.setdefault('xor_gadgets', {})
+            else:
+                gadgets.setdefault('xor_gadgets', self.gadget_finder.find_xor_gadgets())
             pattern_matches = PatternEngine().classify(analysis, gadgets)
             analysis['pattern_matches'] = [m.to_dict() for m in pattern_matches]
             if pattern_matches:
                 self.log(f"  [+] 泛化模式: {PatternEngine().summary(pattern_matches)}")
             for m in pattern_matches:
                 vt = PatternEngine.VULN_MAP.get(m.pattern_id)
-                if not vt or vt in ('packed', 'go'):
+                if not vt or vt in ('packed', 'go', 'protocol'):
                     continue
                 existing = next(((i, c) for i, c in enumerate(candidates) if c[0] == vt), None)
                 if existing is None or m.confidence > existing[1][1]:

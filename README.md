@@ -107,7 +107,7 @@ Windows 也可使用：`pwnsolver.bat solve .\vuln -l .\libc.so.6`。
 | 宿主机 | 二进制架构 | 实际执行后端 |
 |---|---|---|
 | macOS Apple Silicon (arm64) | x86/x86_64 ELF | **强制** OrbStack/Docker `linux/amd64` 容器 |
-| macOS Intel | x86/x86_64 ELF | 优先容器（保证 pwntools/GDB/one_gadget 一致） |
+| macOS Intel | x86/x86_64 ELF | **统一容器**（与 Apple Silicon 同策略，Docker 不可用则拒绝执行） |
 | Linux x86_64 | x86/x86_64 ELF | 本机原生；`PWNSOLVER_FORCE_DOCKER=1` 可强制容器 |
 | Linux aarch64 | x86/x86_64 ELF | 强制 `linux/amd64` 容器 |
 | Windows | x86/x86_64 ELF | Docker Desktop `linux/amd64` 优先，Docker 不可用回退 WSL2 |
@@ -154,3 +154,12 @@ scripts/pwn-x86 python3 /pwnsolver/pwn_solver/solver.py /ctf/vuln -l /ctf/libc.s
 ```
 
 详细设计见 `docs/REVERSE_SKILL_INTEGRATION.md`。
+
+
+## 镜像发布方式
+
+- 推荐：GitHub Actions workflow `.github/workflows/publish-x86-image.yml`
+  推送到 `ghcr.io/<owner>/pwnsolver-x86:latest`；若配置 `DOCKERHUB_USERNAME/DOCKERHUB_TOKEN`
+  可同时推 Docker Hub。
+- 免构建：GitHub Release `v0.1.0-x86-image` 提供 `docker save | zstd` 归档，
+  使用 `scripts/load-x86-image.sh` 导入。

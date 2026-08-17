@@ -226,6 +226,7 @@ class DeepRecon:
             "password", "admin", "secret", "ptrace", "LD_PRELOAD", "seccomp",
             "PR_SET", "open", "read", "write", "mprotect", "/proc/self",
             "gopclntab", "go.buildid", "rust", "panic", "puts", "printf",
+            "pb-c", "protobuf", "pack_to_buffer",
         )
         found: List[str] = []
         for line in out.splitlines():
@@ -294,6 +295,7 @@ class DeepRecon:
             "cpp": False,
             "go": False,
             "rust": False,
+            "protobuf_c": False,
             "static": bool(info.get("static")) if isinstance(info, dict) else False,
             "stripped": bool(info.get("stripped")) if isinstance(info, dict) else False,
             "evidence": [],
@@ -312,6 +314,12 @@ class DeepRecon:
         if any(m.lower() in blob for m in ("rust_eh_personality", "panicked at", "rust_begin_unwind", "/rustc/")):
             result["rust"] = True
             result["evidence"].append("Rust runtime/panic markers")
+        if any(m.lower() in blob for m in ("pb-c", "protobuf_c_message", "pack_to_buffer", "message->base.descriptor")):
+            result["protobuf_c"] = True
+            result["evidence"].append("protobuf-c generated pack/unpack routines")
+        if b'\x28\xaa\xee\xf9' in self._read_prefix(1024 * 1024):
+            result["protobuf_c"] = True
+            result["evidence"].append("ProtobufCMessageDescriptor magic 0x28AAEEF9")
         if not result["evidence"]:
             result["evidence"].append("no strong language markers; assume native C/C-like")
         return result

@@ -39,6 +39,7 @@ class PatternEngine:
         'heap_menu': 'heap',
         'packed_binary': 'packed',
         'go_binary': 'go',
+        'protobuf_protocol': 'protocol',
     }
 
     def classify(self, analysis: Dict[str, Any], gadgets: Optional[Dict[str, Any]] = None) -> List[PatternMatch]:
@@ -128,6 +129,12 @@ class PatternEngine:
         if lang.get('go'):
             matches.append(PatternMatch('go_binary', 'Go Binary', 'triage', 'go', 70,
                                         ['Go runtime markers']))
+        if lang.get('protobuf_c'):
+            matches.append(PatternMatch(
+                'protobuf_protocol', 'Protobuf-C Protocol', 'protocol', 'protocol', 75,
+                ['protobuf-c pack/unpack surface'],
+                {'magic': '0x28AAEEF9',
+                 'strategy': 'parse ProtobufCMessageDescriptor; look for size/idx confusion in unpack path'}))
 
         matches.sort(key=lambda m: m.confidence, reverse=True)
         return matches

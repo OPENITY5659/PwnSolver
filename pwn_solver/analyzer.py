@@ -67,7 +67,48 @@ class BinaryAnalyzer:
     def find_interesting_functions(self):
         """查找有趣的函数 — stripped binary aware"""
         elf = self.elf
-        
+
+        # Go/CGO 二进制符号多且 objdump 输出巨大，先快速降级。
+        try:
+            go_sections = {str(sec.name) for sec in elf.iter_sections() if sec and sec.name}
+            if '.gopclntab' in go_sections or '.go.buildinfo' in go_sections or 'runtime.main' in elf.symbols:
+                self._is_go_binary = True
+                self._heap_menu = {}
+                self._array_overflow = {}
+                self._prng_info = {}
+                self._stack_pivot = {}
+                self._yes_or_no = {}
+                self._inner_overflows = []
+                self._input_stages = []
+                dangerous = []
+                useful = []
+                for name in elf.plt:
+                    low = name.lower()
+                    if any(pat in low for pat in ('read', 'write', 'open', 'malloc', 'free', 'mprotect', 'exec', 'system')):
+                        dangerous.append((f'plt.{name}', hex(elf.plt[name])))
+                        useful.append((f'plt.{name}', hex(elf.plt[name])))
+                return {
+                    'dangerous': dangerous,
+                    'useful': useful,
+                    'win': [],
+                    'implied_win': [],
+                    'has_binsh': False,
+                    'has_flag': False,
+                    'plt_functions': list(elf.plt.keys()),
+                    'got_functions': list(elf.got.keys()),
+                    'stripped': elf.stripped,
+                    'heap_menu': {},
+                    'array_overflow': {},
+                    'prng_info': {},
+                    'is_go_binary': True,
+                    'stack_pivot': {},
+                    'yes_or_no_style': {},
+                    'inner_overflows': [],
+                    'input_stages': [],
+                }
+        except Exception:
+            pass
+
         dangerous = []
         useful = []
         win = []
@@ -263,7 +304,27 @@ class BinaryAnalyzer:
         has_free = '<free@plt>' in disasm
         has_calloc = '<calloc@plt>' in disasm or '<malloc@plt>' in disasm
         has_scarf = '<__isoc99_scanf@plt>' in disasm
-        if not (has_free and has_calloc and has_scarf):
+
+        # 通用菜单字符串识别（覆盖 stripped / 非 scanf 菜单题）
+        try:
+            _s = subprocess.run(['strings', '-n', '5', self.binary_path],
+                                capture_output=True, text=True, timeout=10).stdout or ''
+            menu_markers = [
+                '1.Add diary', '2.Show diary', '3.Delete diary', '4.Edit diary',
+                '1. malloc heap', '2. free heap', '3. edit heap', '4. show heap',
+                '1. Add', '2. Show', '3. Delete', '4. Edit',
+            ]
+            has_menu_strings = any(m in _s for m in menu_markers)
+        except Exception:
+            has_menu_strings = False
+
+        if not (has_free and has_calloc and has_scarf) and not has_menu_strings:
+            return info
+        if has_menu_strings:
+            info['heap_menu'] = True
+            info['menu_options'] = 'strings'
+            info['free_count'] = info['free_count'] or len(re.findall(r'call\s+.*<free@plt>', disasm))
+            info['calloc_count'] = info['calloc_count'] or len(re.findall(r'call\s+.*<(?:calloc|malloc)@plt>', disasm))
             return info
         
         # 统计调用次数 (菜单题通常每个功能调用一次)
@@ -492,6 +553,8 @@ class BinaryAnalyzer:
     
     def find_buffer_sizes(self):
         """通过反汇编估计缓冲区大小，包括嵌套函数中的read()溢出"""
+        if getattr(self, '_is_go_binary', False):
+            return []
         buffers = []
         
         try:
