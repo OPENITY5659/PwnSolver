@@ -90,6 +90,13 @@ def cmd_solve(args, recon_only=False):
     binary = args.binary
     libc = args.libc or _find_option(args.solver_args, ('-l', '--libc'))
     ld = args.ld or _find_option(args.solver_args, ('-d', '--ld'))
+    # 7z/zip 解包通常会丢失 executable bit，宿主机先补齐，避免容器内 process() 报错。
+    for path in (binary, libc, ld):
+        if path and os.path.exists(path):
+            try:
+                os.chmod(path, os.stat(path).st_mode | 0o111)
+            except Exception:
+                pass
     r = RuntimeRouter()
     plan = r.plan(binary, libc, ld)
     if plan.backend == 'error':

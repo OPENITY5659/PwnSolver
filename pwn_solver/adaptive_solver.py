@@ -170,6 +170,12 @@ class AdaptiveSolver:
         protections = analysis.get('protections', {})
         plt = gadgets.get('plt', {})
         specific = gadgets.get('specific', {})
+        intel = analysis.get('reverse_intel') or {}
+        has_seccomp = bool(
+            any(x in plt for x in ('seccomp_init', 'seccomp_load', 'seccomp_rule_add'))
+            or intel.get('anti_analysis', {}).get('seccomp', False)
+            or (analysis.get('functions', {}).get('anti_analysis') or {}).get('seccomp', False)
+        )
         
         methods = []
         
@@ -180,8 +186,8 @@ class AdaptiveSolver:
         if real_win or implied_win:
             methods.append({'name': 'ret2win', 'priority': 100})
         
-        # 2. one_gadget (含回退链)
-        if gadgets.get('one_gadgets'):
+        # 2. one_gadget (含回退链)。seccomp 禁 execve，必须跳过。
+        if gadgets.get('one_gadgets') and not has_seccomp:
             methods.append({
                 'name': 'one_gadget',
                 'priority': 95,
@@ -193,8 +199,8 @@ class AdaptiveSolver:
         if not protections.get('nx', True):
             methods.append({'name': 'shellcode', 'priority': 90})
         
-        # 4. ret2libc
-        if gadgets.get('pop_rdi_in_binary') and self.solver.libc_path:
+        # 4. ret2libc。seccomp 下 system/one_gadget 均无效，不浪费时间。
+        if gadgets.get('pop_rdi_in_binary') and self.solver.libc_path and not has_seccomp:
             methods.append({
                 'name': 'ret2libc',
                 'priority': 85,
@@ -210,8 +216,8 @@ class AdaptiveSolver:
         if heap_menu.get('heap_menu'):
             methods.append({'name': 'heap', 'priority': 75})
         
-        # 7. ROP
-        if funcs.get('dangerous') and protections.get('nx', True):
+        # 7. ROP。seccomp 下通用 system ROP 不适用；仅 ret2syscall/ORW 可尝试。
+        if funcs.get('dangerous') and protections.get('nx', True) and not has_seccomp:
             methods.append({'name': 'rop', 'priority': 50})
         
         methods.sort(key=lambda x: x['priority'], reverse=True)

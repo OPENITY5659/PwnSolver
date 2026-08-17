@@ -27,6 +27,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Normalize GHCR image owner
+        id: ghcr-owner
+        run: |
+          owner="${{ github.repository_owner }}"
+          echo "owner=${owner,,}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -35,5 +41,5 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/openity5659/pwnsolver-x86:latest
-            ghcr.io/openity5659/pwnsolver-x86:${{ github.sha }}
+            ghcr.io/${{ steps.ghcr-owner.outputs.owner }}/pwnsolver-x86:latest
+            ghcr.io/${{ steps.ghcr-owner.outputs.owner }}/pwnsolver-x86:${{ github.sha }}

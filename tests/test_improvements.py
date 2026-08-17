@@ -42,6 +42,19 @@ def test_solver_imports():
     from solver import PwnSolver
     assert PwnSolver is not None
 
+def test_ciscn_specialized_exploits():
+    from exploit_templates import GoStackExploit, OrangeCatDiaryExploit
+    assert GoStackExploit.KNOWN_PARAMS['offset'] == 0x1d0
+    assert OrangeCatDiaryExploit.COMPAT_LD.endswith('ld-2.23.so')
+    assert 0xf03a4 in OrangeCatDiaryExploit.ONE_GADGETS
+
+def test_pattern_engine_ciscn_overlays():
+    from pattern_engine import PatternEngine, PatternMatch
+    assert 'go_stack_overflow' in PatternEngine.VULN_MAP
+    assert PatternEngine.VULN_MAP['go_stack_overflow'] == 'go_stack'
+    assert PatternEngine.VULN_MAP.get('orange_cat_diary') == 'orange_cat'
+    assert issubclass(PatternMatch, object)
+
 def test_feedback_analyzer():
     from feedback_analyzer import FeedbackAnalyzer, FeedbackResult, ErrorType, AdjustmentSuggestion
     fa = FeedbackAnalyzer(verbose=False)

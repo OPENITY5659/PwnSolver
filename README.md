@@ -38,6 +38,16 @@ PwnSolver/
 └── writeup_ctfshow_2025.md
 ```
 
+## 一键启动 GUI
+
+| 系统 | 入口 | 说明 |
+|---|---|---|
+| Windows | 双击 `start_gui.bat` | 自动定位 Python，启动 `pwn_gui.py` |
+| Linux | 双击/执行 `start_gui.sh` | x86_64 本机原生；ARM64 仅提示容器需求，GUI 仍可启动 |
+| macOS | 双击 `start_gui.command` | 启动 GUI；OrbStack 未运行仅警告，仍可 recon |
+
+也可以使用统一入口 `python3 pwnsolver.py gui`。
+
 ## 环境
 
 依赖（可用 `python check_env.py` 自检）：
@@ -131,10 +141,30 @@ Windows 也可使用：`pwnsolver.bat solve .\vuln -l .\libc.so.6`。
 | `badboy_array_oob` | 有符号索引越界读写 | BadBoyArrayOOBExploit | ✅ BadBoy-2 |
 | `yes_or_no` | read-only 抬栈 + one_gadget | YesOrNoExploit | ✅ pwn5_x/pwn |
 | `heap_menu` | 堆菜单 UAF/tcache | HeapExploit + rtld_global/setcontext 参数表 | ⚠ 已识别；pwn03/pwn04 全自动待完善 |
+| `go_stack_overflow` | Go bufio.Scanner 拷贝溢出 | GoStackExploit | ✅ CISCN 2024 gostack |
+| `orange_cat_diary` | glibc 2.23 House of Orange + fastbin | OrangeCatDiaryExploit | ✅ CISCN 2024 orange_cat_diary |
 | `packed_binary` / `go_binary` | 分诊/符号恢复 | UPX 解包 / Go 符号恢复指引 | 侦察覆盖 |
 
 模式识别在 `pwn_solver/pattern_engine.py`，exploit 生成在 `pwn_solver/exploit_templates/`。
 新增同类题目只需补充模式特征，不需要改主决策链。
+
+## CISCN 2024 PWN benchmark 状态
+
+`scripts/ciscn_bench.py` 会遍历解包后的 ELF，逐个调用统一入口，并把结构化结果写入 `reports/`。
+
+| 题目 | 自动解题 | 备注 |
+|---|---|---|
+| gostack | ✅ | 新增 GoStackExploit，保留 Scanner token header 后写 BSS + execve |
+| orange_cat_diary | ✅ | 新增 OrangeCatDiaryExploit，House of Orange 泄漏 + fastbin 劫持 `__malloc_hook` |
+| ezbuf (pwn) | ❌ 结构化诊断 | protobuf-c 协议恢复未自动化；seccomp + 堆利用需手工 |
+| EzHeap | ❌ 结构化诊断 | glibc 2.35 堆题 + seccomp，需 House of Apple/FSOP 链 |
+
+复跑命令：
+
+```bash
+python3 scripts/ciscn_bench.py --root /path/to/ciscnbench --mode recon --tag ciscn2024
+python3 scripts/ciscn_bench.py --root /path/to/ciscnbench --mode solve --tag ciscn2024
+```
 
 ## reverse-skill 增强（feature/reverse-skill-integration）
 

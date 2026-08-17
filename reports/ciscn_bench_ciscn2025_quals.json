@@ -1,0 +1,98 @@
+{
+  "generated_at": "2026-08-17 13:01:42",
+  "root": "/private/tmp/ciscnbench2025",
+  "mode": "solve",
+  "results": [
+    {
+      "binary": "/private/tmp/ciscnbench2025/PWN-easy_rw/proxy",
+      "relative": "proxy",
+      "mode": "solve",
+      "rc": 1,
+      "elapsed": 20.92,
+      "vuln": "one_gadget@95",
+      "patterns": [
+        "packed_binary(99)",
+        "one_gadget(90)",
+        "ret2libc(88)",
+        "format_string(78)"
+      ],
+      "success": false,
+      "errors": [
+        "[-] 本地测试失败: segfault @ 0x7fffff691b01 (exit=0)",
+        "[-] 本地测试失败: wrong_output (exit=0)",
+        "[-] 本地测试失败: segfault @ 0x7fffff691b01 (exit=0)"
+      ],
+      "evidence_dir": "/private/tmp/ciscnbench2025/PWN-easy_rw/pwnsolver_evidence"
+    },
+    {
+      "binary": "/private/tmp/ciscnbench2025/PWN-easy_rw/server",
+      "relative": "server",
+      "mode": "solve",
+      "rc": 1,
+      "elapsed": 17.25,
+      "vuln": "one_gadget@95",
+      "patterns": [
+        "one_gadget(90)",
+        "ret2libc(88)",
+        "format_string(78)"
+      ],
+      "success": false,
+      "errors": [
+        "[-] 本地测试失败: eof (exit=1)",
+        "stderr: Traceback (most recent call last):",
+        "[feedback] ✗ 超时",
+        "[-] 本地测试失败: timeout (exit=0)",
+        "[-] 本地测试失败: eof (exit=1)",
+        "stderr: Traceback (most recent call last):",
+        "[-] 本地测试失败: eof (exit=1)",
+        "stderr: Traceback (most recent call last):"
+      ],
+      "evidence_dir": "/private/tmp/ciscnbench2025/PWN-easy_rw/pwnsolver_evidence"
+    },
+    {
+      "binary": "/private/tmp/ciscnbench2025/PWN-minihttpd/main",
+      "relative": "main",
+      "mode": "solve",
+      "rc": 1,
+      "elapsed": 28.99,
+      "vuln": "one_gadget@90",
+      "patterns": [
+        "one_gadget(90)",
+        "ret2libc(88)",
+        "format_string(78)"
+      ],
+      "success": false,
+      "errors": [
+        "[feedback] ✗ 超时",
+        "[-] 本地测试失败: timeout (exit=0)",
+        "[-] 本地测试失败: unknown (exit=0)",
+        "[-] 本地测试失败: unknown (exit=0)",
+        "[-] 本地测试失败: segfault @ 0x7fffff66ab01 (exit=0)"
+      ],
+      "evidence_dir": "/private/tmp/ciscnbench2025/PWN-minihttpd/pwnsolver_evidence"
+    },
+    {
+      "binary": "/private/tmp/ciscnbench2025/PWN-robo/pwn",
+      "relative": "pwn",
+      "mode": "solve",
+      "rc": 1,
+      "elapsed": 33.38,
+      "vuln": "ret2win@96",
+      "patterns": [
+        "ret2win(96)",
+        "one_gadget(90)",
+        "ret2libc(88)",
+        "format_string(78)"
+      ],
+      "success": false,
+      "errors": [
+        "[-] 本地测试失败: wrong_output (exit=0)",
+        "[-] 本地测试失败: segfault @ 0x7fffff3c536a (exit=0)",
+        "[feedback] ✗ 超时",
+        "[-] 本地测试失败: timeout (exit=0)",
+        "[-] 本地测试失败: wrong_output (exit=0)"
+      ],
+      "evidence_dir": "/private/tmp/ciscnbench2025/PWN-robo/pwnsolver_evidence"
+    }
+  ]
+}

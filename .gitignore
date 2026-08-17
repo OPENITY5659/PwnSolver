@@ -52,6 +52,7 @@ exploits/
 _*.py
 /test_*
 *.so
+!pwn_solver/glibc_compat/ld-2.23.so
 extract_docx.py
 
 # ===== Archives / large binaries =====

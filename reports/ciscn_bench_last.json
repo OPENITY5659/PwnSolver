@@ -1,0 +1,74 @@
+{
+  "generated_at": "2026-08-17 13:02:11",
+  "root": "/private/tmp/ciscnbench",
+  "mode": "solve",
+  "results": [
+    {
+      "binary": "/private/tmp/ciscnbench/0-gostack/0-gostack/gostack",
+      "relative": "gostack",
+      "mode": "solve",
+      "rc": 0,
+      "elapsed": 5.44,
+      "vuln": "go_stack@92",
+      "patterns": [
+        "go_stack_overflow(92)",
+        "go_binary(70)"
+      ],
+      "success": true,
+      "errors": [],
+      "evidence_dir": "/private/tmp/ciscnbench/0-gostack/0-gostack/pwnsolver_evidence"
+    },
+    {
+      "binary": "/private/tmp/ciscnbench/1-orange_cat_diary (1)/1-orange_cat_diary/orange_cat_diary",
+      "relative": "orange_cat_diary",
+      "mode": "solve",
+      "rc": 0,
+      "elapsed": 5.91,
+      "vuln": "orange_cat@99",
+      "patterns": [
+        "orange_cat_diary(99)",
+        "heap_menu(97)",
+        "one_gadget(90)",
+        "ret2libc(88)",
+        "format_string(78)"
+      ],
+      "success": true,
+      "errors": [],
+      "evidence_dir": "/private/tmp/ciscnbench/1-orange_cat_diary (1)/1-orange_cat_diary/pwnsolver_evidence"
+    },
+    {
+      "binary": "/private/tmp/ciscnbench/2-ezbuf/2-ezbuf/pwn",
+      "relative": "pwn",
+      "mode": "solve",
+      "rc": 1,
+      "elapsed": 5.63,
+      "vuln": "one_gadget@90",
+      "patterns": [
+        "one_gadget(90)",
+        "ret2libc(88)",
+        "format_string(78)",
+        "protobuf_protocol(75)"
+      ],
+      "success": false,
+      "errors": [],
+      "evidence_dir": "/private/tmp/ciscnbench/2-ezbuf/2-ezbuf/pwnsolver_evidence"
+    },
+    {
+      "binary": "/private/tmp/ciscnbench/5-EzHeap/5-EzHeap/EzHeap",
+      "relative": "EzHeap",
+      "mode": "solve",
+      "rc": 1,
+      "elapsed": 5.2,
+      "vuln": "heap@97",
+      "patterns": [
+        "heap_menu(97)",
+        "one_gadget(90)",
+        "ret2libc(88)",
+        "format_string(78)"
+      ],
+      "success": false,
+      "errors": [],
+      "evidence_dir": "/private/tmp/ciscnbench/5-EzHeap/5-EzHeap/pwnsolver_evidence"
+    }
+  ]
+}

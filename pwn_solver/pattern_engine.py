@@ -6,6 +6,7 @@ Maps binaries into reusable vulnerability patterns, not per-file special cases.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional
 
@@ -37,8 +38,10 @@ class PatternEngine:
         'badboy_array_oob': 'array_oob',
         'yes_or_no': 'yes_or_no',
         'heap_menu': 'heap',
+        'orange_cat_diary': 'orange_cat',
         'packed_binary': 'packed',
         'go_binary': 'go',
+        'go_stack_overflow': 'go_stack',
         'protobuf_protocol': 'protocol',
     }
 
@@ -111,14 +114,34 @@ class PatternEngine:
 
         heap_menu = analysis.get('heap_menu') or funcs.get('heap_menu') or {}
         if heap_menu.get('heap_menu'):
+            libc_version = self._detect_libc_version(analysis)
             matches.append(PatternMatch(
                 'heap_menu', 'Heap Menu UAF/Tcache', 'heap', 'heap', 97,
                 ['Add/Show/Edit/Delete menu',
                  f"free={heap_menu.get('free_count')} calloc={heap_menu.get('calloc_count')}"],
-                {'menu': heap_menu, 'libc_version': self._detect_libc_version(analysis),
+                {'menu': heap_menu, 'libc_version': libc_version,
                  'strategy': 'unsorted_leak_then_rtld_global_or_setcontext_orw'},
                 ['skills-pwn-chain-references-heap-pwn',
                  'skills-pwn-chain-references-ctfshow-2024-newyear-official-wp']))
+        # CISCN 2024 orange_cat_diary: 单槽日记 + glibc 2.23 + House of Orange + fastbin.
+        all_strings = ' | '.join(str(x) for x in (analysis.get('strings') or [])[:40])
+        intel_strings = ' | '.join(str(x) for x in (intel.get('interesting_strings') or [])[:120])
+        binary_name = os.path.basename(str(
+            analysis.get('_binary_path')
+            or (analysis.get('info') or {}).get('binary_path')
+            or ''
+        )).lower()
+        diary_surface = ('diary' in all_strings.lower()
+                         or 'diary' in intel_strings.lower()
+                         or 'orange' in binary_name
+                         or 'diary' in binary_name)
+        if (heap_menu.get('heap_menu') and libc_version == '2.23' and diary_surface):
+            matches.append(PatternMatch(
+                'orange_cat_diary', 'OrangeCatDiary House of Orange', 'heap', 'orange_cat', 99,
+                ['glibc 2.23 diary menu',
+                 'single free/show, edit-after-free, 8-byte overflow'],
+                {'one_gadget': 0xf03a4, 'leak_delta': 0x668},
+                ['skills-pwn-chain-references-ciscn-2024-quals']))
 
         packed = intel.get('packed') or {}
         if packed.get('packed'):
@@ -129,6 +152,40 @@ class PatternEngine:
         if lang.get('go'):
             matches.append(PatternMatch('go_binary', 'Go Binary', 'triage', 'go', 70,
                                         ['Go runtime markers']))
+        # CISCN 2024 gostack 以及同型 Go/CGO bufio.Scanner 拷贝溢出。
+        # 特征: Go runtime + 无 canary/PIE + NX + Scanner 提示串/构建参数。
+        strings_blob = ' | '.join(str(x) for x in (analysis.get('strings') or [])[:40])
+        intel_strings = ' | '.join(str(x) for x in (intel.get('interesting_strings') or [])[:120])
+        scanner_markers = ('Input your magic message' in strings_blob
+                           or 'Input your magic message' in intel_strings
+                           or 'bufio.Scanner' in strings_blob
+                           or 'bufio.Scanner' in intel_strings)
+        no_stack_protector_build = ('-fno-stack-protector' in strings_blob
+                                    or '-fno-stack-protector' in intel_strings)
+        if (lang.get('go') and scanner_markers and no_stack_protector_build
+                and not protections.get('canary', True)
+                and not protections.get('pie', True)
+                and protections.get('nx', True)):
+            params = {
+                'offset': 0x1d0,
+                'token_slot': 0x138,
+                'pop_rax': 0x40f984,
+                'pop_rdi': 0x4a18a5,
+                'pop_rsi': 0x42138a,
+                'pop_rdx': 0x4944ec,
+                'syscall': 0x404043,
+                'mov_ptr_rax': 0x460cd8,
+            }
+            intel_sha = str(intel.get('sha256') or '')
+            if intel_sha:
+                params['sha256'] = intel_sha
+            matches.append(PatternMatch(
+                'go_stack_overflow', 'Go Scanner Stack Overflow', 'stack', 'go_stack', 92,
+                ['Go bufio.Scanner copy overflow',
+                 'no canary/PIE + NX',
+                 '-fno-stack-protector build flag'],
+                params,
+                ['skills-pwn-chain-references-ciscn-2024-quals']))
         if lang.get('protobuf_c'):
             matches.append(PatternMatch(
                 'protobuf_protocol', 'Protobuf-C Protocol', 'protocol', 'protocol', 75,

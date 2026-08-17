@@ -31,6 +31,8 @@ from exploit_templates import (
     BadBoyArrayOOBExploit,
     YesOrNoExploit,
     Ret2SyscallExploit,
+    GoStackExploit,
+    OrangeCatDiaryExploit,
 )
 
 class PwnSolver:
@@ -546,6 +548,8 @@ class PwnSolver:
             'array_oob': BadBoyArrayOOBExploit,
             'yes_or_no': YesOrNoExploit,
             'ret2syscall': Ret2SyscallExploit,
+            'go_stack': GoStackExploit,
+            'orange_cat': OrangeCatDiaryExploit,
         }
 
         ExploitClass = exploit_map.get(vuln_type)
@@ -706,6 +710,22 @@ class PwnSolver:
             if combo:
                 self.log(f" ④ 组合: {', '.join(combo)}")
 
+            # 协议型/堆型 + seccomp 的题目当前没有全自动 exploit：
+            # 与其让 ORW/one_gadget/ROP 浪费时间，不如直接产出结构化诊断。
+            pattern_ids = {m.get('pattern_id') if isinstance(m, dict) else getattr(m, 'pattern_id', None) for m in (analysis.get('pattern_matches') or [])}
+            if has_seccomp and 'protobuf_protocol' in pattern_ids:
+                self.log("\n[!] protobuf-c + seccomp challenge detected.")
+                self.log("    Current engine cannot recover ProtobufCMessageDescriptor semantics automatically.")
+                self.log("    Run: python3 pwnsolver.py recon ./pwn --deep-r2 and inspect the descriptor.")
+                self._print_failure(analysis, gadgets, vuln_type)
+                return False
+            if has_seccomp and vuln_type[0] == 'heap':
+                self.log("\n[!] heap-menu + seccomp challenge detected.")
+                self.log("    Generic ORW stack engine is not applicable; needs heap layout/FSOP (House of Apple) chain.")
+                self.log("    Recon evidence and playbook have been generated for manual exploitation.")
+                self._print_failure(analysis, gadgets, vuln_type)
+                return False
+
             # ====== Step 3: 简单方法优先 ======
             self.log(f"\n ③ 尝试简单方法...")
 
@@ -722,6 +742,12 @@ class PwnSolver:
                 code = self.generate_exploit(analysis, gadgets)
                 if code and self.test_exploit(timeout=30):
                     self._print_success("yes_or_no + one_gadget")
+                    return True
+            if vuln_type[0] == 'orange_cat' and vuln_type[1] >= 95:
+                self.log("  尝试 orange_cat_diary House of Orange + fastbin...")
+                code = self.generate_exploit(analysis, gadgets)
+                if code and self.test_exploit(timeout=40):
+                    self._print_success("orange_cat_diary (House of Orange + fastbin)")
                     return True
 
             # 3a: ret2win — 最简单
