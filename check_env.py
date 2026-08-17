@@ -63,6 +63,21 @@ def check():
     except Exception as e:
         results.append(("reverse-skill 知识库", False, str(e)))
 
+    # 泛化模式引擎 / 运行时路由
+    try:
+        import sys as _sys
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in _sys.path:
+            _sys.path.insert(0, _here)
+        from pwn_solver.pattern_engine import PatternEngine
+        results.append(("泛化模式引擎", True, f"{len(PatternEngine.VULN_MAP)} 类模式"))
+        from pwn_solver.runtime_router import RuntimeRouter
+        router = RuntimeRouter()
+        results.append(("运行时路由", True, router.describe()))
+    except Exception as e:
+        results.append(("泛化模式引擎", False, str(e)))
+        results.append(("运行时路由", False, str(e)))
+
     # x86_64 容器（Apple Silicon 宿主机上的 PWN 沙盒）
     import platform as _platform
     if _platform.system() == "Darwin" and _platform.machine().lower() in ("arm64", "aarch64"):

@@ -37,6 +37,11 @@ IS_WINDOWS = (os.name == 'nt')
 IS_MACOS = (sys.platform == 'darwin')
 IS_ARM64 = (IS_MACOS and os.uname().machine.lower() in ('arm64', 'aarch64')) if IS_MACOS else False
 X86_IMAGE = os.environ.get('PWNSOLVER_X86_IMAGE', 'pwnsolver-x86:latest')
+try:
+    sys.path.insert(0, str(PROJECT_ROOT / 'pwn_solver'))
+    from runtime_router import RuntimeRouter as _RuntimeRouter
+except Exception:
+    _RuntimeRouter = None
 
 # ========= 主窗口 =========
 class PwnSolverGUI:
@@ -57,6 +62,10 @@ class PwnSolverGUI:
         self._build_ui()
         self.log("PwnSolver GUI v2 已启动", 'info')
         self.log('选择binary → 开始解题 → 成功后可交互Shell', 'info')
+        if _RuntimeRouter is not None:
+            self.router = _RuntimeRouter()
+            self.backend_status_var.set(self.router.describe())
+            self.log(f"🖥 执行后端: {self.router.describe()}", 'bold')
         self._refresh_exp_list()
         report = self._find_latest_report()
         if report:
@@ -69,7 +78,11 @@ class PwnSolverGUI:
         header.pack(fill='x')
         tk.Label(header, text="🔧 PwnSolver v2 — 自适应PWN解题框架",
                 font=('Consolas', 13, 'bold'), fg='#cdd6f4', bg='#2d2d44',
-                pady=8).pack()
+                pady=8).pack(side='left', padx=20)
+        self.backend_status_var = tk.StringVar(value='detecting...')
+        tk.Label(header, textvariable=self.backend_status_var,
+                font=('Consolas', 9), fg='#94e2d5', bg='#2d2d44',
+                pady=10).pack(side='right', padx=20)
         
         # === 配置区 ===
         cfg_frame = tk.Frame(self.root, bg='#1e1e2e', pady=8)
@@ -292,7 +305,7 @@ class PwnSolverGUI:
             self.log(line, 'error')
         elif any(k in line for k in ['⚠', 'warning', '警告']):
             self.log(line, 'warning')
-        elif any(k in line for k in ['📋', '①', '决策', '阶段', 'gadgets', 'seccomp']):
+        elif any(k in line for k in ['📋', '①', '决策', '阶段', 'gadgets', 'seccomp', '泛化模式']):
             self.log(line, 'bold')
         elif any(k in line for k in ['$', '#', '>>>', 'uid=', 'interactive']):
             self.log(line, 'shell')

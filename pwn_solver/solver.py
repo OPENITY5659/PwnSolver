@@ -468,6 +468,26 @@ class PwnSolver:
             self.log(f"  [!] 无法判断，默认ret2win尝试")
             candidates.append(('ret2win', 20, '默认'))
 
+        # 泛化模式引擎 overlay：同名模式用更完整信号修正置信度
+        try:
+            from pattern_engine import PatternEngine
+            gadgets.setdefault('xor_gadgets', self.gadget_finder.find_xor_gadgets())
+            pattern_matches = PatternEngine().classify(analysis, gadgets)
+            analysis['pattern_matches'] = [m.to_dict() for m in pattern_matches]
+            if pattern_matches:
+                self.log(f"  [+] 泛化模式: {PatternEngine().summary(pattern_matches)}")
+            for m in pattern_matches:
+                vt = PatternEngine.VULN_MAP.get(m.pattern_id)
+                if not vt or vt in ('packed', 'go'):
+                    continue
+                existing = next(((i, c) for i, c in enumerate(candidates) if c[0] == vt), None)
+                if existing is None or m.confidence > existing[1][1]:
+                    if existing is not None:
+                        candidates.pop(existing[0])
+                    candidates.append((vt, m.confidence, '; '.join(m.reasons)))
+        except Exception as exc:
+            self.log(f"  [!] 泛化模式引擎不可用: {exc}")
+
         candidates.sort(key=lambda x: x[1], reverse=True)
         self.vuln_type = candidates[0]
         self.log(f"\n  [*] 选择策略: {self.vuln_type[0]} (置信度: {self.vuln_type[1]})")

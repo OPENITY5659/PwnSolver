@@ -613,6 +613,13 @@ class PlaybookBuilder:
         for hit in routes:
             lines.append(f"1. **{hit.doc.title}** (`{hit.doc.skill_id}`) score={hit.score}: {'; '.join(hit.reasons)}")
         lines.append("")
+        pattern_matches = analysis.get('pattern_matches') or []
+        if pattern_matches:
+            lines.append("## 泛化模式")
+            lines.append("")
+            for pm in pattern_matches[:6]:
+                lines.append(f"- `{pm.get('pattern_id')}` -> `{pm.get('vuln_type')}` ({pm.get('confidence')}): {'; '.join(pm.get('reasons') or [])}")
+            lines.append("")
         lines.append("## 执行清单")
         lines.append("")
         for i, step in enumerate(checklist, 1):

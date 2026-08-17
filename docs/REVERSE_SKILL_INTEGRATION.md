@@ -156,3 +156,37 @@ scripts/sync_reverse_skill.sh
 - `BaseExploit.launch_code` 改用 loader `--library-path`，避免目标 shell 继承旧 libc 路径。
 - 新增 BadBoy 签名检测与 `BadBoyArrayOOBExploit`、`YesOrNoExploit`。
 - GUI 增加 reverse-skill/recon/x86 sandbox 开关、LD 自动检测、报告入口、环境自检。
+
+
+## 10. 智能运行时路由与统一入口
+
+新增 `pwn_solver/runtime_router.py` 与根目录 `pwnsolver.py`：
+
+```bash
+python3 pwnsolver.py router
+python3 pwnsolver.py check
+python3 pwnsolver.py solve ./vuln -l ./libc.so.6 -d ./ld-linux-x86-64.so.2
+python3 pwnsolver.py recon ./vuln --deep-r2
+python3 pwnsolver.py gui
+python3 pwnsolver.py web
+python3 pwnsolver.py patterns
+```
+
+路由规则：
+
+- macOS Apple Silicon：强制 `linux/amd64` Docker/OrbStack 容器。
+- Linux x86_64：默认本机；`PWNSOLVER_FORCE_DOCKER=1` 可统一容器。
+- Linux aarch64：x86 ELF 强制容器。
+- Windows：Docker Desktop 优先，不可用时回退 WSL2。
+- 自动处理 binary/libc/ld 目录挂载、`SYS_PTRACE`、seccomp 参数、镜像缺失提示。
+
+## 11. 泛化模式引擎
+
+新增 `pwn_solver/pattern_engine.py`，把题目归类到可复用模式而不是单一文件特判：
+
+`ret2win` / `ret2libc` / `format_string` / `shellcode` / `one_gadget` /
+`ssal_ret2syscall` / `badboy_array_oob` / `yes_or_no` / `heap_menu` /
+`packed_binary` / `go_binary`。
+
+`solver.py` 在阶段 3 会把 PatternEngine 的结果 overlay 到原有判型结果；
+playbook 也会输出 “泛化模式” 章节。

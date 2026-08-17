@@ -82,27 +82,73 @@ pytest tests/
 phpserialize-solver 的已知问题与修复进展见 `phpserialize-solver/ISSUES.md`，实测题解见 `phpserialize-solver/WRITEUP.md`。
 
 
-## reverse-skill 增强（feature/reverse-skill-integration）
+## 统一智能入口（推荐）
 
-本分支接入 [zhaoxuya520/reverse-skill](https://github.com/zhaoxuya520/reverse-skill)，
-为 PWN 解题增加“先逆向、后利用”的深度侦察与技能路由能力：
-
-- `reverse_skill/` — vendored skill 子集：pwn-chain / reverse-engineering / radare2 / ghidra-reverse / go-rust-reverse / competition-reverse-pwn
-- `pwn_solver/deep_recon.py` — rabin2/file/strings 深度分诊（packer、Go/Rust、反分析、hash/entropy），落盘 `pwnsolver_evidence/*.recon.json|md`
-- `pwn_solver/reverse_skill.py` — skill 路由、工具探测、`*.playbook.md` 生成
-- `solver.py` — 新增阶段 1.5 DeepRecon、阶段 3.5 playbook；原 CLI 完全兼容
+本分支提供唯一入口 `pwnsolver.py`，所有平台自动路由到正确的执行后端：
 
 ```bash
-# 仅侦察（不生成/测试 exploit）
-python pwn_solver/solver.py ./vuln --recon-only
+python3 pwnsolver.py router                         # 查看当前平台路由决策
+python3 pwnsolver.py check                          # 在目标运行时内自检环境
+python3 pwnsolver.py build                          # 构建 x86_64 Linux 沙盒镜像
 
-# 关闭 reverse-skill 增强
-python pwn_solver/solver.py ./vuln --no-skill
+python3 pwnsolver.py solve ./vuln -l ./libc.so.6 -d ./ld-linux-x86-64.so.2 -t 30
+python3 pwnsolver.py recon ./vuln --deep-r2         # 仅深度侦察 + playbook
+python3 pwnsolver.py gui                            # 启动 GUI
+python3 pwnsolver.py web 8787                       # 启动 Web API
+python3 pwnsolver.py patterns                       # 查看泛化漏洞模式库
 ```
 
-Apple Silicon (M4) 宿主机处理 x86/x86_64 ELF 时，使用 OrbStack amd64 容器：
+Windows 也可使用：`pwnsolver.bat solve .\vuln -l .\libc.so.6`。
+
+## 智能运行时路由
+
+“实际运行题目”统一采用可复现的 Linux x86_64 环境；静态侦察可在宿主机先跑。
+
+| 宿主机 | 二进制架构 | 实际执行后端 |
+|---|---|---|
+| macOS Apple Silicon (arm64) | x86/x86_64 ELF | **强制** OrbStack/Docker `linux/amd64` 容器 |
+| macOS Intel | x86/x86_64 ELF | 优先容器（保证 pwntools/GDB/one_gadget 一致） |
+| Linux x86_64 | x86/x86_64 ELF | 本机原生；`PWNSOLVER_FORCE_DOCKER=1` 可强制容器 |
+| Linux aarch64 | x86/x86_64 ELF | 强制 `linux/amd64` 容器 |
+| Windows | x86/x86_64 ELF | Docker Desktop `linux/amd64` 优先，Docker 不可用回退 WSL2 |
+| 任意平台 | arm64 ELF | Linux aarch64 原生；其余建议容器内 qemu/交叉工具链 |
+
+> 结论：**统一容器**是推荐策略。`runtime_router.py` 会自动处理路径映射、目录挂载、
+> `SYS_PTRACE`、seccomp 参数与镜像缺失提示。
+
+## 泛化模式库（Pattern Engine）
+
+不再针对单一题目硬编码，而是把题目归纳为可复用模式：
+
+| 模式 ID | 漏洞类型 | 自动策略 | 验证状态 |
+|---|---|---|---|
+| `ret2win` | 栈溢出 | Ret2WinExploit | ✅ ret2win.c |
+| `ret2libc` | 栈溢出 + leak | Ret2LibcExploit | ✅ 基础题目 |
+| `format_string` | 格式化字符串 | FormatStringExploit | 基础覆盖 |
+| `shellcode` | NX 关闭 | ShellcodeExploit | 基础覆盖 |
+| `one_gadget` | 溢出 + libc | OneGadgetExploit | 基础覆盖 |
+| `ssal_ret2syscall` | PRNG + stdin-only + syscall 链 | Ret2SyscallExploit | ✅ s.s.a.l |
+| `badboy_array_oob` | 有符号索引越界读写 | BadBoyArrayOOBExploit | ✅ BadBoy-2 |
+| `yes_or_no` | read-only 抬栈 + one_gadget | YesOrNoExploit | ✅ pwn5_x/pwn |
+| `heap_menu` | 堆菜单 UAF/tcache | HeapExploit + rtld_global/setcontext 参数表 | ⚠ 已识别；pwn03/pwn04 全自动待完善 |
+| `packed_binary` / `go_binary` | 分诊/符号恢复 | UPX 解包 / Go 符号恢复指引 | 侦察覆盖 |
+
+模式识别在 `pwn_solver/pattern_engine.py`，exploit 生成在 `pwn_solver/exploit_templates/`。
+新增同类题目只需补充模式特征，不需要改主决策链。
+
+## reverse-skill 增强（feature/reverse-skill-integration）
+
+- `reverse_skill/` — vendored skill 子集：pwn-chain / reverse-engineering / radare2 / ghidra-reverse / go-rust-reverse / competition-reverse-pwn
+- `pwn_solver/deep_recon.py` — rabin2/file/strings 深度分诊，落盘 `pwnsolver_evidence/*.recon.json|md`
+- `pwn_solver/reverse_skill.py` — skill 路由、工具探测、`*.playbook.md` 生成
+- `solver.py` — 阶段 1.5 DeepRecon、阶段 3.5 playbook、阶段 3 泛化模式 overlay
 
 ```bash
+# 原 CLI 仍可用
+python pwn_solver/solver.py ./vuln --recon-only
+python pwn_solver/solver.py ./vuln --no-skill
+
+# 手工容器（统一入口内部会自动调用）
 scripts/pwn-x86-build
 scripts/pwn-x86 python3 /pwnsolver/pwn_solver/solver.py /ctf/vuln -l /ctf/libc.so.6
 ```

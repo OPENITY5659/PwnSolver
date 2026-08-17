@@ -52,19 +52,32 @@ class TaskManager:
             self.tasks[task_id] = {'status': 'running', 'stdout': '', 'stderr': '', 'rc': None, 'start': time.time()}
         
         def worker():
-            cmd = ['python3', '-W', 'ignore', str(WORKSPACE / 'pwn_solver' / 'solver.py'),
-                   str(binary)]
+            try:
+                sys.path.insert(0, str(WORKSPACE / 'pwn_solver'))
+                from runtime_router import RuntimeRouter
+                router = RuntimeRouter()
+                plan = router.plan(str(binary), str(libc or ''), str(ld or ''))
+            except Exception:
+                plan = None
+
+            extra = []
             if libc:
-                cmd += ['-l', str(libc)]
+                extra += ['-l', plan.map_path(str(libc)) if plan and plan.backend == 'docker-amd64' else str(libc)]
             if ld:
-                cmd += ['-d', str(ld)]
+                extra += ['-d', plan.map_path(str(ld)) if plan and plan.backend == 'docker-amd64' else str(ld)]
             if remote and len(remote) == 2:
-                cmd += ['-r', str(remote[0]), str(int(remote[1]))]
+                extra += ['-r', str(remote[0]), str(int(remote[1]))]
             if no_skill:
-                cmd += ['--no-skill']
+                extra += ['--no-skill']
             if recon_only:
-                cmd += ['--recon-only']
-            cmd += ['-t', str(timeout)]
+                extra += ['--recon-only']
+            extra += ['-t', str(timeout)]
+
+            if plan and plan.backend in ('docker-amd64', 'wsl'):
+                inner = plan.inner_solver_command(str(binary), extra)
+                cmd = plan.build_command(inner)
+            else:
+                cmd = ['python3', '-W', 'ignore', str(WORKSPACE / 'pwn_solver' / 'solver.py'), str(binary)] + extra
             
             try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
