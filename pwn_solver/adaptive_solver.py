@@ -200,7 +200,11 @@ class AdaptiveSolver:
             methods.append({'name': 'shellcode', 'priority': 90})
         
         # 4. ret2libc。seccomp 下 system/one_gadget 均无效，不浪费时间。
-        if gadgets.get('pop_rdi_in_binary') and self.solver.libc_path and not has_seccomp:
+        # canary + 回显函数时走两阶段 canary 泄露模板, 无需二进制内 pop_rdi。
+        echo_plt = any(f in plt for f in ('write', 'puts', 'printf'))
+        canary_leakable = protections.get('canary') and echo_plt
+        if self.solver.libc_path and not has_seccomp and \
+                (gadgets.get('pop_rdi_in_binary') or canary_leakable):
             methods.append({
                 'name': 'ret2libc',
                 'priority': 85,

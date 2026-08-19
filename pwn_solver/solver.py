@@ -87,6 +87,15 @@ class PwnSolver:
                     if verbose:
                         print(f"  🔍 自动检测到libc: {os.path.basename(detected)}")
             except ImportError: pass
+        # 本地求解场景 fallback: 动态链接题目在本地运行时, 系统 libc 就是真实运行时 libc。
+        # 仅当目标确实是本机可执行的动态 ELF 时启用 (远程题目应由用户显式提供 libc)。
+        if not self.libc_path and self._is_locally_runnable_dynamic_elf():
+            for cand in self._system_libc_candidates():
+                if cand and os.path.isfile(cand):
+                    self.libc_path = cand
+                    if verbose:
+                        print(f"  🔍 使用本地系统 libc fallback: {cand}")
+                    break
         if not self.ld_path:
             try:
                 from badchars import auto_detect_ld
@@ -109,6 +118,50 @@ class PwnSolver:
         self.vuln_type = None
         self.exploit = None
         self.exploit_result = None
+
+    def _is_locally_runnable_dynamic_elf(self):
+        """本地求解场景判断: 目标是 x86/x64 动态链接 ELF 且本机可执行。"""
+        import platform
+        try:
+            with open(self.original_binary_path or self.binary_path, 'rb') as f:
+                if f.read(4) != b'\x7fELF':
+                    return False
+                f.seek(16)
+                etype = int.from_bytes(f.read(2), 'little')
+                f.seek(18)
+                machine = int.from_bytes(f.read(2), 'little')
+                f.seek(0x20)
+                interp = f.read(64)
+            if etype != 2:  # ET_EXEC; ET_DYN(PIE) 需要 loader 配合, 也允许
+                if etype != 3:
+                    return False
+            machine_map = {3: 'i386', 62: 'amd64', 183: 'aarch64', 40: 'arm'}
+            arch = machine_map.get(machine)
+            host = platform.machine().lower()
+            host_norm = 'amd64' if host in ('x86_64', 'amd64') else ('i386' if host in ('i686', 'x86', 'i386') else host)
+            if arch not in (host_norm, {'amd64': 'i386'}.get(host_norm)):
+                return False
+            return b'ld-linux' in interp or b'ld-musl' in interp or b'/lib' in interp
+        except Exception:
+            return False
+
+    def _system_libc_candidates(self):
+        """本机系统 libc 路径候选 (按优先级)。"""
+        import glob as _glob
+        import platform
+        machine = platform.machine().lower()
+        out = []
+        if platform.system() == 'Linux':
+            arch_dir = 'i386-linux-gnu' if machine in ('i686', 'x86', 'i386') else 'x86_64-linux-gnu'
+            out += [f'/usr/lib/{arch_dir}/libc.so.6', f'/lib/{arch_dir}/libc.so.6']
+        elif platform.system() == 'Windows':
+            # WSL 场景: solver 在 WSL 内运行时上面 Linux 分支已覆盖; 从 Windows
+            # 直接运行时由 RuntimeRouter 转发到 WSL, 这里不会触达。
+            pass
+        for pat in ('/lib/x86_64-linux-gnu/libc.so.6', '/lib/i386-linux-gnu/libc.so.6'):
+            if pat not in out:
+                out.append(pat)
+        return out
 
     def _maybe_unpack_upx(self):
         """reverse-skill elf-analysis.md: UPX! 标记 -> upx -d 到临时副本。"""
@@ -383,6 +436,20 @@ class PwnSolver:
                     and not n.startswith('_')]
         # stripped下从PLT/string/disasm推断的win
         implied_win = funcs.get('implied_win', [])
+        # calls_<fn>@plt 是反汇编确认的"调用 win 函数"的函数入口, 比 PLT 桩地址
+        # (system@plt+4 之类, 直接跳会因 rdi 未设置而失败) 可靠, 优先采纳
+        calls_win = [(n, a) for n, a in implied_win if str(n).startswith('calls_')]
+        if calls_win and funcs.get('win') is not None:
+            try:
+                cw_addr_val = int(calls_win[0][1], 16)
+                if not any(int(str(a), 16) == cw_addr_val for _, a in funcs.get('win', [])):
+                    funcs['win'] = list(funcs.get('win', [])) + [
+                        (f'win_{calls_win[0][0]}', calls_win[0][1])]
+                    real_win = [(n, a) for n, a in funcs['win']
+                                if not n.endswith('.c') and 'plt.' not in n
+                                and 'got.' not in n and not n.startswith('_')]
+            except (ValueError, TypeError):
+                pass
         has_system_plt = 'system' in plt
         has_binsh = funcs.get('has_binsh', False)
         pie_enabled = protections.get('pie', False)
@@ -413,6 +480,16 @@ class PwnSolver:
             # stripped但推断出win路径
             candidates.append(('ret2win', 92, f'推断win路径: {implied_win[0][0]}'))
             self.log(f"  [+] 候选: ret2win (stripped推断) - {implied_win[0][0]} @ {implied_win[0][1]}")
+            # 把推断出的 win 注入 functions.win, 让模板真正跳到 win 函数
+            # (直接跳 system@plt 不可行 - rdi 未设置)
+            try:
+                iw_name, iw_addr = implied_win[0][0], implied_win[0][1]
+                iw_addr_val = int(iw_addr, 16) if isinstance(iw_addr, str) else int(iw_addr)
+                if iw_name.startswith('calls_') and funcs.get('win') is not None:
+                    if not any(int(str(a), 16) == iw_addr_val for _, a in funcs.get('win', [])):
+                        funcs['win'] = list(funcs.get('win', [])) + [(iw_name, hex(iw_addr_val))]
+            except (ValueError, TypeError):
+                pass
         elif has_system_plt and has_dangerous:
             # 即使没有明确的win，有system@plt+危险函数也是ret2win
             candidates.append(('ret2win', 80, f'system@plt+危险函数'))
@@ -433,9 +510,14 @@ class PwnSolver:
 
         # 3. ret2libc - 有pop_rdi时可用
         if has_dangerous and has_leak and protections.get('nx', True):
-            if has_pop_rdi:
-                candidates.append(('ret2libc', 85, 'NX+溢出+输出函数+pop_rdi'))
-                self.log(f"  [+] 候选: ret2libc (置信度: 高) - 有pop_rdi")
+            # canary + 回显函数 -> 两阶段 canary 泄露模板已支持, 恢复高置信度
+            echo_plt = any(f in plt for f in ('write', 'puts', 'printf'))
+            canary_leakable = protections.get('canary') and echo_plt
+            if has_pop_rdi or canary_leakable:
+                conf = 85 if has_pop_rdi else 75
+                why = 'pop_rdi' if has_pop_rdi else 'canary泄露路径(write/puts回显)'
+                candidates.append(('ret2libc', conf, f'NX+溢出+输出函数+{why}'))
+                self.log(f"  [+] 候选: ret2libc (置信度: {'高' if has_pop_rdi else '中高'}) - {why}")
             else:
                 candidates.append(('ret2libc', 50, 'NX+溢出但无pop_rdi'))
                 self.log(f"  [+] 候选: ret2libc (置信度: 低) - 无pop_rdi!")

@@ -38,7 +38,7 @@ class BinaryAnalyzer:
             'endian': 'little' if elf.endian == 'little' else 'big',
             'execstack': elf.execstack,
             'pie': elf.pie,
-            'nx': elf.nx,
+            'nx': (elf.nx if elf.nx is not None else not bool(elf.execstack)),
             'relro': elf.relro,
         }
         
@@ -49,18 +49,23 @@ class BinaryAnalyzer:
         """安全机制检查"""
         if self._protections:
             return self._protections
-        
+
         elf = self.elf
-        
+
+        # pwntools 4.15: execstack ELF 的 elf.nx 可能是 None (非 False), 统一规范化为 bool
+        nx = elf.nx
+        if nx is None:
+            nx = not bool(elf.execstack)
+
         protections = {
             'canary': elf.canary,
-            'nx': elf.nx,
+            'nx': nx,
             'pie': elf.pie,
             'relro': elf.relro == 'Full',
             'partial_relro': elf.relro == 'Partial',
             'rwx_segments': elf.execstack,
         }
-        
+
         self._protections = protections
         return protections
     
@@ -192,10 +197,14 @@ class BinaryAnalyzer:
             for match in re.finditer(r'call\s+.*<([^>]+)>', disasm):
                 target = match.group(1)
                 if 'system' in target.lower() or 'execve' in target.lower():
-                    addr_match = re.search(r'^\s*([0-9a-f]+):', 
+                    addr_match = re.search(r'^\s*([0-9a-f]+):',
                                           disasm[:match.start()].split('\n')[-1])
                     if addr_match:
-                        implied_win.append((f'calls_{target}', f'0x{addr_match.group(1)}'))
+                        call_addr = int(addr_match.group(1), 16)
+                        # 回溯到包含该 call 的函数入口: 优先 win 常规序言
+                        # (endbr64/push rbp), 否则向前找最近 ret 之后的指令
+                        fn_start = self._find_function_start(disasm, call_addr)
+                        implied_win.append((f'calls_{target}', hex(fn_start)))
                         break
             
             # 统计危险调用
@@ -246,6 +255,38 @@ class BinaryAnalyzer:
             'input_stages': self._detect_input_stages(),
         }
     
+    def _find_function_start(self, disasm: str, call_addr: int) -> int:
+        """从 call 地址回溯到所在函数的入口地址 (stripped 下推断 win 函数开头)。
+
+        策略: 收集全部指令地址, 从 call 向前扫描, 遇到函数序言
+        (endbr64 / push rbp 紧跟 mov rbp,rsp) 即认为是入口;
+        若无序言, 则取最近一条 ret 之后的下一条指令。
+        """
+        import re as _re
+        insns = []  # (addr, text)
+        for line in disasm.splitlines():
+            m = _re.match(r'^\s*([0-9a-f]+):\s+(.*)$', line)
+            if m:
+                insns.append((int(m.group(1), 16), m.group(2).strip()))
+        idx = None
+        for i, (a, _) in enumerate(insns):
+            if a == call_addr:
+                idx = i
+                break
+        if idx is None:
+            return call_addr
+        for i in range(idx, -1, -1):
+            addr, text = insns[i]
+            if 'push   rbp' in text or 'push\t rbp' in text or text.startswith('push rbp'):
+                # 序言通常: endbr64; push rbp; mov rbp,rsp — 入口取再前一条 endbr64
+                if i > 0 and 'endbr64' in insns[i - 1][1]:
+                    return insns[i - 1][0]
+                return addr
+            if i < idx and (text.startswith('ret') or text == 'ret'):
+                # 已越过函数边界仍未命中序言: 取 ret 后第一条
+                return insns[i + 1][0] if i + 1 <= idx else call_addr
+        return insns[0][0] if insns else call_addr
+
     def _detect_input_stages(self):
         """检测多阶段输入模式(如s.s.a.l: read→scanf→read)。"""
         try:

@@ -109,7 +109,10 @@ def cmd_solve(args, recon_only=False):
         extra.append('--no-skill')
     mapped = _mapped_args(extra, plan, libc, ld)
     mapped_binary = plan.map_path(binary)
-    solver = '/pwnsolver/pwn_solver/solver.py' if plan.backend == 'docker-amd64' else str(SOLVER_SCRIPT)
+    if plan.backend == 'docker-amd64':
+        solver = '/pwnsolver/pwn_solver/solver.py'
+    else:
+        solver = plan.map_path(str(SOLVER_SCRIPT))
     inner = 'python3 -W ignore ' + shlex.quote(solver) + ' ' + shlex.quote(mapped_binary)
     if mapped:
         inner += ' ' + ' '.join(shlex.quote(x) for x in mapped)

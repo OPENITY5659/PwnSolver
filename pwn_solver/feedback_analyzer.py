@@ -156,7 +156,7 @@ class FeedbackAnalyzer:
         has_crash_evidence = bool(
             re.search(r'(?:SIGSEGV|SIGILL|SIGABRT|segmentation\s+fault|illegal\s+instruction|stopped.*signal|Program\s+received\s+signal|process\s+\d+\s+stopped)', combined, re.I)
         )
-        
+
         if clean_exit and not has_crash_evidence:
             # 1a. 强成功标志
             for pat in self.SUCCESS_PATTERNS:

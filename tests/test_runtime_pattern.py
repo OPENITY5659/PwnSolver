@@ -42,6 +42,10 @@ def test_runtime_router_detects_platform_and_has_mapping_api():
         assert mapped.startswith('/ctf'), mapped
         assert '/pwnsolver' in [c for _, c in plan.mounts]
         assert any('SYS_PTRACE' in x for x in plan.build_command('true'))
+    elif plan.backend == 'wsl':
+        # Windows + WSL2: Windows 盘符路径必须映射为 /mnt/<drive>/... 形式
+        mapped = plan.map_path(r'D:\tmp\pwnbench\vuln')
+        assert mapped.startswith('/mnt/'), mapped
     else:
         assert plan.map_path(binary) == binary
 
