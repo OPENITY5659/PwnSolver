@@ -120,28 +120,38 @@ class PwnSolver:
         self.exploit_result = None
 
     def _is_locally_runnable_dynamic_elf(self):
-        """本地求解场景判断: 目标是 x86/x64 动态链接 ELF 且本机可执行。"""
+        """本地求解场景判断: 目标是 x86/x64 动态链接 ELF 且本机可执行。
+
+        通过遍历 PT_INTERP 判断动态链接 (而非读固定偏移, stripped 二进制 interp
+        不在固定文件位置), 并校验架构与本机一致。
+        """
         import platform
         try:
-            with open(self.original_binary_path or self.binary_path, 'rb') as f:
-                if f.read(4) != b'\x7fELF':
-                    return False
-                f.seek(16)
-                etype = int.from_bytes(f.read(2), 'little')
-                f.seek(18)
-                machine = int.from_bytes(f.read(2), 'little')
-                f.seek(0x20)
-                interp = f.read(64)
-            if etype != 2:  # ET_EXEC; ET_DYN(PIE) 需要 loader 配合, 也允许
-                if etype != 3:
-                    return False
-            machine_map = {3: 'i386', 62: 'amd64', 183: 'aarch64', 40: 'arm'}
-            arch = machine_map.get(machine)
+            from pwn import ELF as _ELF
+            elf = _ELF(self.original_binary_path or self.binary_path, checksec=False)
+            # PT_INTERP 存在 = 动态链接, 有 loader
+            interp = ''
+            try:
+                for seg in elf.segments:
+                    if seg.header.p_type == 'PT_INTERP':
+                        interp = bytes(seg.data()).decode(errors='ignore').rstrip('\x00')
+                        break
+            except Exception:
+                pass
+            if not interp:
+                return False
+            # pwntools e_machine 可能是字符串('EM_X86_64')或整数
+            machine_map = {3: 'i386', 62: 'amd64', 183: 'aarch64', 40: 'arm',
+                           'EM_386': 'i386', 'EM_X86_64': 'amd64',
+                           'EM_AARCH64': 'aarch64', 'EM_ARM': 'arm'}
+            e_machine = elf.header.e_machine
+            arch = machine_map.get(e_machine) or machine_map.get(getattr(e_machine, 'value', None))
             host = platform.machine().lower()
             host_norm = 'amd64' if host in ('x86_64', 'amd64') else ('i386' if host in ('i686', 'x86', 'i386') else host)
+            # amd64 宿主可跑 i386, 反之不可
             if arch not in (host_norm, {'amd64': 'i386'}.get(host_norm)):
                 return False
-            return b'ld-linux' in interp or b'ld-musl' in interp or b'/lib' in interp
+            return True
         except Exception:
             return False
 
