@@ -54,10 +54,9 @@ def test_rop_exploit_no_recv_after_close():
 
 def test_rop_exploit_rebases_libc_offset_gadgets():
     code = _gen_roP()
-    # 偏移重定位逻辑必须存在 (POP_RDI 是偏移时 + libc.address)
-    assert 'use_rdi' not in code or True  # ROPExploit uses chain_rdi
-    assert 'chain_rdi = POP_RDI if POP_RDI > (libc.address or 0)' in code, \
-        'POP_RDI offset must be rebased against libc.address'
+    # binary 内 gadget (0x400000+) 直接用, libc 偏移 (<0x300000) 加 libc.address
+    assert 'if 0x400000 <= POP_RDI < 0x10000000' in code, \
+        'binary gadget must NOT add libc.address; libc offset must rebase'
     # 无 binary ret 时从 libc 取对齐 ret
     assert "ROP(libc).ret.address" in code
     # 拿到 shell 后必须主动发验证命令
@@ -99,7 +98,7 @@ def test_ret2libc_leak_stage2_rebases_pop_rdi():
                         gadgets=gadgets, libc_path='/tmp/bench/libc.so.6')
     code = e.generate()
     assert 'use_rdi = POP_RDI' in code
-    assert 'use_rdi < (libc.address or 0)' in code, 'offset pop_rdi must be rebased'
+    assert 'not (0x400000 <= use_rdi < 0x10000000)' in code, 'binary gadget no-rebase, libc offset rebase'
     assert 'ROP(libc).ret.address' in code, 'stack alignment ret from libc'
     ast.parse(code)
 
