@@ -18,6 +18,20 @@ class BinaryAnalyzer:
         self.elf = ELF(binary_path, checksec=False)
         self._info = None
         self._protections = None
+        self._disasm = None  # 反汇编缓存 (避免重复 objdump)
+
+    def _get_disasm(self):
+        """获取反汇编输出 (缓存, 全程只跑一次 objdump)"""
+        if self._disasm is None:
+            try:
+                result = subprocess.run(
+                    ['objdump', '-d', '-M', 'intel', self.binary_path],
+                    capture_output=True, text=True, timeout=30
+                )
+                self._disasm = result.stdout
+            except Exception:
+                self._disasm = ""
+        return self._disasm
         
     def log(self, msg):
         if self.verbose:
@@ -186,11 +200,7 @@ class BinaryAnalyzer:
         
         # === 4. 反汇编分析（找call system@plt的代码） ===
         try:
-            result = subprocess.run(
-                ['objdump', '-d', '-M', 'intel', self.binary_path],
-                capture_output=True, text=True, timeout=30
-            )
-            disasm = result.stdout
+            disasm = self._get_disasm()
             
             # 找 "call.*system@plt" 模式
             import re
@@ -232,6 +242,15 @@ class BinaryAnalyzer:
             # === 新增: yes_or_no 签名 ===
             self._yes_or_no = self._detect_yes_or_no(disasm)
             
+            # === 新增: 格式字符串漏洞检测 (printf(buf) 非字符串字面量) ===
+            self._fmt_string = self._detect_format_string(disasm)
+            
+            # === 新增: 全局变量与立即数比较 (fmtstr 写目标: if (secret==X) win()) ===
+            self._global_compare = self._detect_global_compare(disasm)
+            
+            # === 新增: read+write 栈泄露模式 (canary/PIE 绕过) ===
+            self._io_leak = self._detect_io_leak(disasm)
+            
         except Exception:
             pass
         
@@ -253,7 +272,262 @@ class BinaryAnalyzer:
             'yes_or_no_style': getattr(self, '_yes_or_no', {}),
             'inner_overflows': getattr(self, '_inner_overflows', []),
             'input_stages': self._detect_input_stages(),
+            'fmt_string': getattr(self, '_fmt_string', {}),
+            'global_compare': getattr(self, '_global_compare', []),
+            'io_leak': getattr(self, '_io_leak', {}),
         }
+
+    def _detect_format_string(self, disasm):
+        """检测格式化字符串漏洞: printf(buf) — 格式参数来自栈缓冲区而非 rodata 字面量
+
+        特征 (按函数切分):
+          lea rax,[rbp-0xN] ... mov rdi,rax ... call printf@plt   ← 漏洞
+          mov rdi,[rbp-0xN] ... call printf@plt                    ← 漏洞
+          lea rdi,[rip+...] ... call printf@plt                    ← 安全
+        """
+        info = {'fmt_string': False, 'funcs': [], 'stack_buf': False, 'rodata_fmt': False}
+        func_re = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        cur = None
+        blocks = {}
+        block = []
+        for line in disasm.split('\n'):
+            m = func_re.match(line)
+            if m:
+                if cur and block:
+                    blocks[cur] = block
+                cur = m.group(2)
+                block = []
+            elif cur is not None:
+                block.append(line)
+        if cur and block:
+            blocks[cur] = block
+
+        for fname, lines in blocks.items():
+            # 找 printf 调用位置, 向前回溯 3 行内是否有 lea rax,[rbp-..]→mov rdi,rax 模式
+            vuln = False
+            for i, line in enumerate(lines):
+                if not re.search(r'call\s+.*<(?:printf|sprintf|vsnprintf|fprintf|snprintf)@plt>', line):
+                    continue
+                window = '\n'.join(lines[max(0, i - 4):i])
+                if re.search(r'mov\s+rdi,\s*rax', window) and \
+                   re.search(r'lea\s+rax,\s*\[rbp-0x[0-9a-f]+\]', window):
+                    vuln = True
+                    break
+                if re.search(r'(?:mov|lea)\s+rdi,\s*\[rbp-0x[0-9a-f]+\]', window):
+                    vuln = True
+                    break
+            if vuln:
+                info['funcs'].append(fname)
+                info['stack_buf'] = True
+
+        info['fmt_string'] = bool(info['funcs'])
+        return info
+
+    def _detect_global_compare(self, disasm):
+        """检测全局变量与立即数比较 (fmtstr 写目标)
+
+        模式 (同一函数内):
+          mov eax,DWORD PTR [rip+X]    # 40xxxx <secret>
+          cmp eax,0xdeadbeef
+        用于 FormatStringExploit 自动选择写目标。
+        返回: [{'addr': 绝对地址, 'value': 立即数, 'func': 函数名}]
+        """
+        compares = []
+        func_re = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        cur = None
+        block = []
+        blocks = {}
+        for line in disasm.split('\n'):
+            m = func_re.match(line)
+            if m:
+                if cur and block:
+                    blocks[cur] = block
+                cur = m.group(2)
+                block = []
+            elif cur is not None:
+                block.append(line)
+        if cur and block:
+            blocks[cur] = block
+
+        # 在函数块内: mov eax,DWORD PTR [rip+X] 后(若干指令内)出现 cmp eax, imm32
+        for fname, lines in blocks.items():
+            for i, line in enumerate(lines):
+                m = re.search(r'mov\s+eax,\s*DWORD PTR \[rip[+-]0x([0-9a-f]+)\](?:\s+#\s*([0-9a-f]+)\s*<([^>]*)>)?', line)
+                if not m:
+                    continue
+                # 注释中的绝对地址优先 (非PIE 用); 否则记录 rip 偏移
+                abs_addr = int(m.group(2), 16) if m.group(2) else None
+                rip_off = int(m.group(1), 16)
+                # 向后找 cmp eax, imm
+                for j in range(i + 1, min(i + 8, len(lines))):
+                    cm = re.search(r'cmp\s+eax,\s*(0x[0-9a-fA-F]+)', lines[j])
+                    if cm:
+                        compares.append({
+                            'addr': abs_addr,
+                            'rip_off': rip_off,
+                            'value': int(cm.group(1), 16),
+                            'func': fname,
+                        })
+                        break
+                if compares and compares[-1].get('func') == fname and abs_addr:
+                    # 每函数只取第一个匹配
+                    break
+        # 去重: 按 (addr, value)
+        seen = set()
+        uniq = []
+        for c in compares:
+            k = (c.get('addr'), c.get('value'))
+            if k not in seen:
+                seen.add(k)
+                uniq.append(c)
+        return uniq
+
+    def _detect_io_leak(self, disasm):
+        """检测 read+write 栈泄露模式 (hardened ret2libc: canary/PIE 绕过)
+
+        特征 (同一函数内):
+          read(0, buf, size) → write(1, buf, 固定长度 > 帧大小)
+        或 scanf(size) + read(0, buf, size) + write (FORTIFY 绕过型)
+        返回: {'io_leak', 'style': 'read_write'|'scanf_size_read', 'func',
+               'read_size', 'scanf_size', 'call_vuln_ret_off',
+               'dist_canary': buf→canary 距离, 'dist_ret': buf→ret 距离}
+        支持 rbp 帧 (-O0) 与 rsp 帧 (-O2) 两种布局。
+        """
+        info = {'io_leak': False, 'style': None, 'func': None,
+                'read_size': 0, 'scanf_size': False, 'call_vuln_ret_off': None,
+                'dist_canary': None, 'dist_ret': None, 'frame_mode': None,
+                'anchor': 'call_vuln'}
+        func_re = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
+        cur = None
+        block = []
+        blocks = {}
+        for line in disasm.split('\n'):
+            m = func_re.match(line)
+            if m:
+                if cur and block:
+                    blocks[cur] = block
+                cur = m.group(2)
+                block = []
+            elif cur is not None:
+                block.append(line)
+        if cur and block:
+            blocks[cur] = block
+
+        vuln_func = None
+        for fname, lines in blocks.items():
+            text = '\n'.join(lines)
+            has_read = bool(re.search(r'call\s+.*<(?:read|__read_chk|_IO_getc)@plt>', text))
+            has_scanf = bool(re.search(r'call\s+.*<__isoc(?:99|23)_scanf@plt>', text))
+            has_write = bool(re.search(r'(?:call|jmp)\s+.*<write@plt>', text))
+            if not ((has_read or has_scanf) and has_write):
+                continue
+            # write 第三个参数 (edx) 是固定立即数 (泄露栈)
+            m = re.search(r'mov\s+edx,\s*(0x[0-9a-fA-F]+)', text)
+            if not m:
+                continue
+            write_size = int(m.group(1), 16)
+            if write_size < 0x50:
+                continue
+            vuln_func = fname
+            info['func'] = fname
+            info['read_size'] = write_size
+            info['scanf_size'] = has_scanf
+            info['style'] = 'scanf_size_read' if has_scanf else 'read_write'
+            info['io_leak'] = True
+
+            # 布局: 先在本块内分析; 找不到再转调用者块 (buf 在调用者帧的场景)
+            frame_extra, buf_rel, mode, canary_off = self._analyze_frame(lines)
+            if mode is None:
+                for cname, clines in blocks.items():
+                    for i, ln in enumerate(clines):
+                        if re.search(r'call\s+[0-9a-f]+\s+<' + re.escape(vuln_func) + r'>', ln):
+                            window = clines[max(0, i - 6):i + 1]
+                            w_extra, w_buf, w_mode, w_can = self._analyze_frame(window)
+                            wtext = '\n'.join(window)
+                            if w_mode == 'rbp' and not re.search(r'sub\s+rsp|push\s+r', wtext):
+                                # 窗口内无帧分配证据 → 用整个调用者块分析
+                                w_extra, w_buf, w_mode, w_can = self._analyze_frame(clines)
+                            if w_mode is not None:
+                                # 帧大小与 canary 用整个调用者块的数据
+                                frame_extra, _, _, canary_off = self._analyze_frame(clines)
+                                buf_rel, mode = w_buf, w_mode
+                                if w_can is not None:
+                                    canary_off = w_can
+                                # buf 在调用者帧 → leak 的 ret 是调用者的返回地址 (libc)
+                                info['anchor'] = 'main_ret'
+                            break
+                    if mode is not None:
+                        break
+
+            if mode == 'rbp' and buf_rel is not None:
+                info['dist_ret'] = buf_rel + 8
+                info['dist_canary'] = buf_rel + canary_off if canary_off is not None else buf_rel - 8
+                info['frame_mode'] = 'rbp'
+            elif mode == 'rsp' and buf_rel is not None:
+                info['dist_ret'] = frame_extra - buf_rel
+                if canary_off is not None:
+                    info['dist_canary'] = canary_off - buf_rel
+                else:
+                    info['dist_canary'] = frame_extra - 8 - buf_rel
+                info['frame_mode'] = 'rsp'
+            break
+
+        # 找调用该函数的循环位置 (call vuln 的下一条指令偏移 = pie base 定位锚点)
+        if vuln_func:
+            call_pat = re.compile(r'call\s+[0-9a-f]+\s+<' + re.escape(vuln_func) + r'>')
+            lines = disasm.split('\n')
+            for i, line in enumerate(lines):
+                if call_pat.search(line):
+                    m = re.match(r'^\s*([0-9a-f]+):', line)
+                    if m and i + 1 < len(lines):
+                        nm = re.match(r'^\s*([0-9a-f]+):', lines[i + 1])
+                        if nm:
+                            info['call_vuln_ret_off'] = int(nm.group(1), 16)
+                        break
+        return info
+
+    def _analyze_frame(self, lines):
+        """在指令行列表内分析栈帧: (frame_extra, buf_rel, mode, canary_off)"""
+        text = '\n'.join(lines)
+        pushes = len(re.findall(r'\spush\s+r', text))
+        subs = [int(x, 16) for x in re.findall(r'sub\s+rsp,\s*(0x[0-9a-fA-F]+)', text)]
+        frame_extra = pushes * 8 + (max(subs) if subs else 0)
+
+        buf_rel = None
+        mode = None
+        # 取最后一个匹配 (call 前最近的 buf 设置)
+        ms = list(re.finditer(r'lea\s+(?:rax|rsi|rdx|rdi),\s*\[rbp-?(0x[0-9a-fA-F]+)\]', text))
+        if ms:
+            buf_rel = int(ms[-1].group(1), 16)
+            mode = 'rbp'
+        if mode is None:
+            ms = list(re.finditer(r'lea\s+(?:rax|rsi|rdx|rdi),\s*\[rsp\+?(0x[0-9a-fA-F]+)\]', text))
+            if ms:
+                buf_rel = int(ms[-1].group(1), 16)
+                mode = 'rsp'
+        if mode is None and re.search(r'mov\s+(?:rsi|rdi),\s*rbp', text):
+            if re.search(r'mov\s+rbp,\s*rsp', text):
+                buf_rel = 0
+                mode = 'rsp'   # rbp 复用为帧内指针
+            else:
+                buf_rel = 0
+                mode = 'rbp'   # buf = rbp 本身 (真帧指针且缓冲在帧顶)
+        if mode is None and re.search(r'mov\s+(?:rsi|rdi),\s*rsp', text):
+            buf_rel = 0
+            mode = 'rsp'
+
+        canary_off = None
+        lines2 = text.split('\n')
+        for i, ln in enumerate(lines2):
+            if 'fs:0x28' in ln and '[' not in ln:
+                for w in lines2[max(0, i - 1):i + 3]:
+                    cm = re.search(r'\[(?:rsp|rbp)([+-])0x([0-9a-fA-F]+)\]', w)
+                    if cm:
+                        canary_off = (1 if cm.group(1) == '+' else -1) * int(cm.group(2), 16)
+                        break
+                if canary_off is not None:
+                    break
+        return frame_extra, buf_rel, mode, canary_off
     
     def _find_function_start(self, disasm: str, call_addr: int) -> int:
         """从 call 地址回溯到所在函数的入口地址 (stripped 下推断 win 函数开头)。
@@ -289,21 +563,14 @@ class BinaryAnalyzer:
 
     def _detect_input_stages(self):
         """检测多阶段输入模式(如s.s.a.l: read→scanf→read)。"""
-        try:
-            result = subprocess.run(
-                ['objdump', '-d', '-M', 'intel', self.binary_path],
-                capture_output=True, text=True, timeout=15
-            )
-            disasm = result.stdout
-        except:
-            return []
-        
+        disasm = self._get_disasm()
         stages = []
         current_func = None
         read_size = 0
         func_pattern = re.compile(r'^([0-9a-f]+)\s+<([^>]+)>:')
         read_pattern = re.compile(r'call\s+.*<read@plt>')
-        scanf_pattern = re.compile(r'call\s+.*<__isoc99_scanf@plt>')
+        scanf_pattern = re.compile(r'call\s+.*<__isoc(?:99|23)?_scanf@plt>')
+        gets_pattern = re.compile(r'call\s+.*<gets@plt>')
         mov_edx_pat = re.compile(r'mov\s+edx,\s*(0x[0-9a-fA-F]+)')
         
         order = 0
@@ -325,7 +592,14 @@ class BinaryAnalyzer:
             elif scanf_pattern.search(line):
                 stages.append({'type':'scanf','size':0,'function':current_func,'order':order})
                 order += 1
+            elif gets_pattern.search(line):
+                stages.append({'type':'gets','size':0,'function':current_func,'order':order})
+                order += 1
         
+        # 按执行顺序排序: main 中的阶段 (菜单等) 先执行, 其余按出现顺序
+        stages.sort(key=lambda s: (0 if s['function'] == 'main' else 1, s['order']))
+        for i, s in enumerate(stages):
+            s['order'] = i
         return stages
     
     def _detect_heap_menu(self, disasm):
@@ -336,15 +610,20 @@ class BinaryAnalyzer:
           - call free@plt   (Delete, 且不置NULL -> UAF)
           - call scanf@plt  (菜单选项输入)
           - bss数组索引存取: lea rax,[rip+X]; mov [rax+idx*8], r (chunk指针数组)
+        也支持 fgets+atoi 菜单 (heap_uaf 风格):
+          - fgets(input); choice = atoi(input); switch(choice)
         """
         import re
         info = {'heap_menu': False, 'free_count': 0, 'calloc_count': 0,
-                'scanf_count': 0, 'ptr_array': None, 'size_array': None,
-                'menu_options': None}
+                'scanf_count': 0, 'fgets_count': 0, 'atoi_found': False,
+                'ptr_array': None, 'size_array': None,
+                'menu_options': None, 'input_style': None}
         
         has_free = '<free@plt>' in disasm
         has_calloc = '<calloc@plt>' in disasm or '<malloc@plt>' in disasm
-        has_scarf = '<__isoc99_scanf@plt>' in disasm
+        has_scanf = '<__isoc99_scanf@plt>' in disasm
+        has_fgets = '<fgets@plt>' in disasm
+        has_atoi = '<atoi@plt>' in disasm or '<strtol@plt>' in disasm
 
         # 通用菜单字符串识别（覆盖 stripped / 非 scanf 菜单题）
         try:
@@ -359,7 +638,7 @@ class BinaryAnalyzer:
         except Exception:
             has_menu_strings = False
 
-        if not (has_free and has_calloc and has_scarf) and not has_menu_strings:
+        if not (has_free and has_calloc and (has_scanf or (has_fgets and has_atoi))) and not has_menu_strings:
             return info
         if has_menu_strings:
             info['heap_menu'] = True
@@ -373,6 +652,9 @@ class BinaryAnalyzer:
         info['calloc_count'] = len(re.findall(r'call\s+.*<calloc@plt>', disasm)) + \
                                len(re.findall(r'call\s+.*<malloc@plt>', disasm))
         info['scanf_count'] = len(re.findall(r'call\s+.*<__isoc99_scanf@plt>', disasm))
+        info['fgets_count'] = len(re.findall(r'call\s+.*<fgets@plt>', disasm))
+        info['atoi_found'] = has_atoi
+        info['input_style'] = 'scanf' if has_scanf else 'fgets_atoi'
         
         # bss数组检测: lea rax,[rip+X] 后跟 mov [rax+idx*8], r (存指针) 
         # 或 mov eax,[rax+idx*4] (存size)
@@ -384,9 +666,10 @@ class BinaryAnalyzer:
         for m in re.finditer(r'lea\s+rax,\[rip\+([0-9a-f]+)\][^\n]*\n(?:[^\n]*\n){0,3}[^\n]*\*8[^\n]*', disasm):
             ptr_arrays.add(m.group(1))
         
-        # 菜单判定: free+calloc都有 + (scanf次数>=3 或 指针数组存在)
+        # 菜单判定: free+calloc都有 + (scanf次数>=3 或 指针数组存在 或 fgets+atoi)
         if info['free_count'] >= 1 and info['calloc_count'] >= 1 and \
-           (info['scanf_count'] >= 3 or len(ptr_arrays) >= 1):
+           (info['scanf_count'] >= 3 or len(ptr_arrays) >= 1 or
+            (has_fgets and has_atoi)):
             info['heap_menu'] = True
             if ptr_arrays:
                 info['ptr_array'] = sorted(ptr_arrays)[0]
@@ -599,11 +882,7 @@ class BinaryAnalyzer:
         buffers = []
         
         try:
-            result = subprocess.run(
-                ['objdump', '-d', '-M', 'intel', self.binary_path],
-                capture_output=True, text=True, timeout=30
-            )
-            disasm = result.stdout
+            disasm = self._get_disasm()
             
             # 搜索函数开头的栈分配
             for line in disasm.split('\n'):

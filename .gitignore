@@ -60,6 +60,8 @@ extract_docx.py
 
 # ===== Reasonix internal =====
 .reasonix/
-
 # ===== PwnSolver reverse-skill evidence (本地产物) =====
 pwnsolver_evidence/
+challenges/ret2win_prompt
+challenges/two_stage
+challenges/loop_menu

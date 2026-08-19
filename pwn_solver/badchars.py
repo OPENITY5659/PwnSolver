@@ -2,8 +2,19 @@
 """
 BadChars检测与绕过引擎 + 自动libc检测
 """
-from pwn import *
-import os, glob, time
+import os, glob, time, struct
+
+def _elf_machine(path):
+    """读取 ELF e_machine (EM_X86_64=62, EM_386=3, EM_AARCH64=183 ...)"""
+    try:
+        with open(path, 'rb') as f:
+            data = f.read(0x20)
+        if data[:4] != b'\x7fELF':
+            return None
+        return struct.unpack('<H', data[18:20])[0]
+    except Exception:
+        return None
+
 
 class BadCharsDetector:
     """自动检测bad characters"""
@@ -21,6 +32,7 @@ class BadCharsDetector:
         """发送0x00-0xff检测哪些被过滤"""
         self.log("检测bad characters...")
         try:
+            from pwn import process
             p = process(self.binary_path)
             all_bytes = bytes(range(256))
             p.send(all_bytes + b'\n')
@@ -58,10 +70,9 @@ class BadCharsDetector:
 
 
 def auto_detect_libc(binary_path):
-    """自动检测同目录下的libc文件"""
+    """自动检测libc: ①同目录命名明确的libc ②fallback系统libc(架构匹配)"""
     binary_dir = os.path.dirname(os.path.abspath(binary_path))
     binary_name = os.path.basename(binary_path)
-    candidates = []
     
     for f in glob.glob(os.path.join(binary_dir, '*')):
         name = os.path.basename(f)
@@ -77,6 +88,17 @@ def auto_detect_libc(binary_path):
                     if bn.startswith('libc') and (bn == 'libc' or bn.startswith('libc.so') or bn.startswith('libc-')):
                         return f
         except: pass
+    
+    # Fallback: 系统 libc (架构匹配后使用)
+    target_machine = _elf_machine(binary_path)
+    try:
+        from utils import find_libc
+        sys_libc = find_libc()
+        if sys_libc and os.path.exists(sys_libc):
+            if target_machine is None or _elf_machine(sys_libc) == target_machine:
+                return sys_libc
+    except Exception:
+        pass
     
     return None  # 只返回明确命名的libc，不fallback到随机ELF
 

@@ -20,8 +20,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 WORKSPACE = Path(__file__).parent
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
-HOST = sys.argv[2] if len(sys.argv) > 2 else '127.0.0.1'  # 默认仅本机, 防局域网未授权RCE
+PORT = 8787
+HOST = '127.0.0.1'  # 默认仅本机, 防局域网未授权RCE
 MAX_BODY = 1 << 20       # body上限1MB
 MAX_TASKS = 32           # 并发任务上限
 MAX_SESSIONS = 16        # 交互会话上限
@@ -33,9 +33,6 @@ SESSION_TTL = 600        # 会话空闲回收时间(秒)
 
 # 非回环地址必须启用token认证, 防条件性未授权RCE
 LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '::1')
-if HOST not in LOOPBACK_HOSTS and not TOKEN:
-    print(f"[pwn-web] 错误: 绑定非回环地址{HOST}必须设置PWNWEB_TOKEN", flush=True)
-    sys.exit(1)
 
 # ============ 任务管理 ============
 class TaskManager:
@@ -43,8 +40,22 @@ class TaskManager:
         self.tasks = {}      # task_id -> {status, stdout, stderr, rc, start}
         self.lock = threading.Lock()
     
-    def submit(self, binary, libc=None, timeout=60, ld=None, remote=None,
-               no_skill=False, recon_only=False):
+    def _build_cmd(self, binary, libc=None, timeout=60, ld=None, remote=None, quiet=False):
+        """构建 solver 命令 (纯函数式, 便于测试)"""
+        cmd = ['python3', '-W', 'ignore', str(WORKSPACE / 'pwn_solver' / 'solver.py'),
+               str(binary)]
+        if libc:
+            cmd += ['-l', str(libc)]
+        if ld:
+            cmd += ['-d', str(ld)]
+        if remote:
+            cmd += ['-r', str(remote[0]), str(remote[1])]
+        cmd += ['-t', str(timeout)]
+        if quiet:
+            cmd += ['-q']
+        return cmd
+
+    def submit(self, binary, libc=None, timeout=60, ld=None, remote=None, quiet=False):
         task_id = uuid.uuid4().hex[:12]
         with self.lock:
             if len(self.tasks) >= MAX_TASKS:
@@ -52,32 +63,7 @@ class TaskManager:
             self.tasks[task_id] = {'status': 'running', 'stdout': '', 'stderr': '', 'rc': None, 'start': time.time()}
         
         def worker():
-            try:
-                sys.path.insert(0, str(WORKSPACE / 'pwn_solver'))
-                from runtime_router import RuntimeRouter
-                router = RuntimeRouter()
-                plan = router.plan(str(binary), str(libc or ''), str(ld or ''))
-            except Exception:
-                plan = None
-
-            extra = []
-            if libc:
-                extra += ['-l', plan.map_path(str(libc)) if plan and plan.backend == 'docker-amd64' else str(libc)]
-            if ld:
-                extra += ['-d', plan.map_path(str(ld)) if plan and plan.backend == 'docker-amd64' else str(ld)]
-            if remote and len(remote) == 2:
-                extra += ['-r', str(remote[0]), str(int(remote[1]))]
-            if no_skill:
-                extra += ['--no-skill']
-            if recon_only:
-                extra += ['--recon-only']
-            extra += ['-t', str(timeout)]
-
-            if plan and plan.backend in ('docker-amd64', 'wsl'):
-                inner = plan.inner_solver_command(str(binary), extra)
-                cmd = plan.build_command(inner)
-            else:
-                cmd = ['python3', '-W', 'ignore', str(WORKSPACE / 'pwn_solver' / 'solver.py'), str(binary)] + extra
+            cmd = self._build_cmd(binary, libc, timeout, ld, remote, quiet)
             
             try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -270,11 +256,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == '/status':
-                import platform as _platform
                 self._json({'ok': True, 'status': 'alive', 'tasks': len(TASKS.tasks),
-                            'sessions': len(INTERACT.sessions), 'time': time.time(),
-                            'platform': {'system': _platform.system(), 'machine': _platform.machine()},
-                            'features': ['reverse-skill', 'deep-recon', 'playbook']})
+                            'sessions': len(INTERACT.sessions), 'time': time.time()})
             elif path.startswith('/solve/'):
                 tid = path.split('/')[-1]
                 t = TASKS.get(tid)
@@ -323,10 +306,13 @@ class Handler(BaseHTTPRequestHandler):
                 libc = body.get('libc')
                 ld = body.get('ld')
                 remote = body.get('remote')
+                if remote:
+                    if not (isinstance(remote, list) and len(remote) == 2):
+                        self._json({'error': 'remote must be [host, port]'}, 400)
+                        return
+                quiet = bool(body.get('quiet'))
                 timeout = min(max(int(body.get('timeout') or 60), 1), MAX_TIMEOUT)
-                tid = TASKS.submit(binary, libc, timeout, ld=ld, remote=remote,
-                                   no_skill=bool(body.get('no_skill')),
-                                   recon_only=bool(body.get('recon_only')))
+                tid = TASKS.submit(binary, libc, timeout, ld=ld, remote=remote, quiet=quiet)
                 self._json({'ok': True, 'task_id': tid, 'poll': f'/solve/{tid}'})
             elif path == '/interact':
                 binary = body.get('binary')
@@ -358,6 +344,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({'error': 'internal error'}, 500)
 
 if __name__ == '__main__':
+    # 命令行参数解析仅在此处, 保证 import 安全
+    PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
+    HOST = sys.argv[2] if len(sys.argv) > 2 else '127.0.0.1'
+    # 非回环地址必须启用token认证, 防条件性未授权RCE
+    if HOST not in LOOPBACK_HOSTS and not TOKEN:
+        print(f"[pwn-web] 错误: 绑定非回环地址{HOST}必须设置PWNWEB_TOKEN", flush=True)
+        sys.exit(1)
     print(f"[pwn-web] 启动 http://localhost:{PORT}", flush=True)
     print(f"[pwn-web] API: /status  /solve  /interact", flush=True)
     server = ThreadingHTTPServer((HOST, PORT), Handler)

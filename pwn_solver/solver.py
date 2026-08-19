@@ -1158,6 +1158,8 @@ def main():
                         help='仅运行最新exp并进入交互shell(不重新解题)')
     parser.add_argument('--no-skill', action='store_true',
                         help='关闭 reverse-skill 增强（仅保留原有 PwnSolver 逻辑）')
+    parser.add_argument('--no-adaptive', action='store_true',
+                        help='禁用自适应求解器 (solve --no-adaptive)')
     parser.add_argument('--skill-root', default=None,
                         help='reverse_skill 目录路径（默认: 仓库根目录/reverse_skill）')
     parser.add_argument('--recon-only', action='store_true',
