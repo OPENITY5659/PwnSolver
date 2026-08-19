@@ -25,6 +25,9 @@ def find_elf_binaries(root: Path):
         low = path.name.lower()
         if low.endswith('.so') or low.startswith('lib') or low.startswith('ld-'):
             continue
+        # core dump (ELF 格式但非题目)
+        if low.startswith('core') or low.startswith('core.'):
+            continue
         try:
             with open(path, 'rb') as f:
                 magic = f.read(4)
